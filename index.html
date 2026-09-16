@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Doorstep — Canvassing Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Doorstep: walk-list and turf-map dashboard for canvassers.">
+<meta name="theme-color" content="#0f6e64">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="stage">
+    <div class="app" id="app">
+
+      <header class="header">
+        <div class="header-top">
+          <div class="wordmark"><span class="mark"></span><span>Doorstep</span></div>
+          <div class="stat-pill" id="statPill">
+            <span class="label">today</span><span id="statValue">—</span>
+          </div>
+        </div>
+
+        <button class="list-trigger" id="listTrigger" aria-expanded="false" aria-controls="listPanel">
+          <span class="lt-text">
+            <span class="lt-eyebrow">Viewing</span>
+            <span class="lt-value" id="triggerValue">Example</span>
+          </span>
+          <svg class="chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </header>
+
+      <div class="panel-backdrop" id="panelBackdrop"></div>
+
+      <div class="panel" id="listPanel" role="region" aria-label="Choose a walk list">
+        <div class="panel-inner" id="panelInner">
+          <div class="panel-heading">Walk lists</div>
+        </div>
+      </div>
+
+      <div class="map-wrap" id="mapWrap">
+        <span class="map-label">Today's turf</span>
+
+        <div id="map"></div>
+
+        <div class="map-fallback" id="mapFallback">
+          <div class="roads-h"></div>
+          <div class="roads-v"></div>
+          <div class="blocks" id="blocks"></div>
+          <div id="fallbackPins"></div>
+          <div class="you-are-here" style="left:52%; top:58%;"></div>
+        </div>
+
+        <div class="map-banner" id="mapBanner" hidden>
+          <span id="mapBannerText">Add a Google Maps API key in config.js to load the live map — showing a preview for now.</span>
+        </div>
+
+        <div class="legend" aria-hidden="false">
+          <div class="legend-row"><span class="dot" style="background:var(--status-done)"></span>Completed</div>
+          <div class="legend-row"><span class="dot" style="background:var(--status-notyet)"></span>Not home</div>
+          <div class="legend-row"><span class="dot" style="background:var(--status-refused)"></span>Refused</div>
+          <div class="legend-row"><span class="dot" style="background:var(--status-upcoming)"></span>Not yet visited</div>
+        </div>
+
+        <button class="fab" id="fabLocate" aria-label="Recenter on my location" title="Recenter">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="2.4" fill="currentColor"/>
+            <path d="M12 2V6M12 18V22M2 12H6M18 12H22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

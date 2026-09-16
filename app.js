@@ -23,25 +23,6 @@
     ]}
   ];
 
-  // Example pin positions as percentages of the map viewport (used for the
-  // offline fallback preview) and converted to lat/lng around MAP_CENTER
-  // (used for the live Google Map).
-  var PINS = [
-    [8,10,"done"],[15,13,"done"],[24,9,"notyet"],[41,11,"upcoming"],[58,8,"done"],
-    [72,12,"refused"],[89,15,"upcoming"],[10,29,"notyet"],[22,33,"done"],[38,27,"upcoming"],
-    [54,31,"done"],[63,25,"refused"],[78,29,"upcoming"],[92,33,"notyet"],[6,50,"upcoming"],
-    [20,46,"done"],[33,52,"notyet"],[47,48,"upcoming"],[60,54,"done"],[74,50,"upcoming"],
-    [86,46,"done"],[13,68,"upcoming"],[28,72,"notyet"],[44,66,"upcoming"],[57,70,"done"],
-    [70,74,"upcoming"],[83,68,"refused"],[18,90,"upcoming"],[45,88,"notyet"],[70,90,"done"]
-  ];
-
-  var STATUS_COLOR = {
-    done: "#1e8e5a",
-    notyet: "#c07f2f",
-    refused: "#b0443c",
-    upcoming: "#8791a0"
-  };
-
   // ---------------------------------------------------------------------
   // Walk list / area list dropdown
   // ---------------------------------------------------------------------
@@ -123,7 +104,7 @@
     });
     aBtn.classList.add("selected");
     triggerValue.textContent = area.name;
-    statValue.textContent = area.done + " of " + area.total + " stops";
+    statValue.textContent = (area.total - area.done) + " of " + area.total + " stops left";
     closePanel();
     try { localStorage.setItem("doorstep.selectedArea", area.id); } catch (e) {}
   }
@@ -170,6 +151,34 @@
   } catch (e) {}
 
   // ---------------------------------------------------------------------
+  // Bottom tab bar (Map / Stats / Profile)
+  // ---------------------------------------------------------------------
+  var tabButtons = document.querySelectorAll(".tab-btn");
+  var screens = {
+    map: document.getElementById("mapWrap"),
+    stats: document.getElementById("statsScreen"),
+    profile: document.getElementById("profileScreen")
+  };
+
+  function selectTab(name) {
+    tabButtons.forEach(function (btn) {
+      var isActive = btn.getAttribute("data-tab") === name;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+    Object.keys(screens).forEach(function (key) {
+      if (!screens[key]) return;
+      screens[key].hidden = key !== name;
+    });
+  }
+
+  tabButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      selectTab(btn.getAttribute("data-tab"));
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // Fallback preview map (shown until a Google Maps API key is set)
   // ---------------------------------------------------------------------
   var blocksEl = document.getElementById("blocks");
@@ -190,19 +199,190 @@
     blocksEl.appendChild(b);
   });
 
-  var fallbackPinsEl = document.getElementById("fallbackPins");
-  PINS.forEach(function (p) {
-    var pin = document.createElement("div");
-    pin.className = "pin " + p[2];
-    pin.style.left = p[0] + "%";
-    pin.style.top = p[1] + "%";
-    fallbackPinsEl.appendChild(pin);
+  // ---------------------------------------------------------------------
+  // Map controls: satellite toggle, search, locate + live heading track
+  // ---------------------------------------------------------------------
+  var satelliteToggle = document.getElementById("satelliteToggle");
+  var searchToggle = document.getElementById("searchToggle");
+  var searchPill = document.getElementById("searchPill");
+  var searchInput = document.getElementById("searchInput");
+  var fabLocate = document.getElementById("fabLocate");
+
+  var satelliteOn = false;
+  satelliteToggle.addEventListener("click", function () {
+    satelliteOn = !satelliteOn;
+    satelliteToggle.classList.toggle("active", satelliteOn);
+    satelliteToggle.setAttribute("aria-pressed", satelliteOn ? "true" : "false");
+    if (window.__doorstepMap) {
+      window.__doorstepMap.setMapTypeId(satelliteOn ? "hybrid" : "roadmap");
+    }
   });
 
-  document.getElementById("fabLocate").addEventListener("click", function () {
-    if (window.__doorstepMap && window.__doorstepMarkers) {
-      window.__doorstepMap.panTo(CONFIG.MAP_CENTER);
-      window.__doorstepMap.setZoom(CONFIG.MAP_ZOOM || 15);
+  searchToggle.addEventListener("click", function () {
+    var isOpen = searchPill.classList.toggle("open");
+    searchToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    if (isOpen) {
+      window.setTimeout(function () { searchInput.focus(); }, 150);
+    } else {
+      searchInput.blur();
+    }
+  });
+
+  function setupSearch() {
+    if (!window.google || !google.maps.places || !window.__doorstepMap) return;
+    var autocomplete = new google.maps.places.Autocomplete(searchInput, {
+      fields: ["geometry", "name"]
+    });
+    autocomplete.bindTo("bounds", window.__doorstepMap);
+    autocomplete.addListener("place_changed", function () {
+      var place = autocomplete.getPlace();
+      if (!place.geometry || !place.geometry.location) return;
+      if (place.geometry.viewport) {
+        window.__doorstepMap.fitBounds(place.geometry.viewport);
+      } else {
+        window.__doorstepMap.panTo(place.geometry.location);
+        window.__doorstepMap.setZoom(16);
+      }
+    });
+  }
+
+  // ---- Personal location: recenter + live tracking + heading rotation ----
+  var tracking = false;
+  var watchId = null;
+  var youMarker = null;
+  var headingHandler = null;
+  var currentHeading = 0;
+
+  function ensureYouMarker(position) {
+    if (!window.__doorstepMap) return;
+    if (!youMarker) {
+      youMarker = new google.maps.Marker({
+        position: position,
+        map: window.__doorstepMap,
+        icon: {
+          path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+          scale: 5,
+          rotation: currentHeading,
+          fillColor: "#2fd6c3",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2
+        },
+        zIndex: 999
+      });
+    } else {
+      youMarker.setPosition(position);
+    }
+  }
+
+  function updateMarkerRotation() {
+    if (!youMarker) return;
+    var icon = youMarker.getIcon();
+    icon.rotation = currentHeading;
+    youMarker.setIcon(icon);
+  }
+
+  function onPosition(pos) {
+    var latLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    ensureYouMarker(latLng);
+    if (window.__doorstepMap) {
+      window.__doorstepMap.panTo(latLng);
+    }
+  }
+
+  function onPositionError() {
+    showMapBanner("Couldn't get your location — check location permissions.");
+    stopTracking();
+  }
+
+  function onOrientation(event) {
+    var heading = null;
+    if (typeof event.webkitCompassHeading === "number") {
+      heading = event.webkitCompassHeading; // iOS Safari: already true-north heading
+    } else if (event.absolute && typeof event.alpha === "number") {
+      heading = 360 - event.alpha;
+    } else if (typeof event.alpha === "number") {
+      heading = 360 - event.alpha;
+    }
+    if (heading === null || isNaN(heading)) return;
+    currentHeading = heading;
+
+    if (CONFIG.MAP_ID && window.__doorstepMap && window.__doorstepMap.moveCamera) {
+      window.__doorstepMap.moveCamera({ heading: heading, tilt: 0 });
+      updateMarkerRotation(); // keep arrow pointing "up" on a rotated map
+      var icon = youMarker && youMarker.getIcon();
+      if (icon) { icon.rotation = 0; youMarker.setIcon(icon); }
+    } else {
+      updateMarkerRotation();
+    }
+  }
+
+  function startOrientation() {
+    var attach = function () {
+      if ("ondeviceorientationabsolute" in window) {
+        headingHandler = onOrientation;
+        window.addEventListener("deviceorientationabsolute", headingHandler);
+      } else if ("DeviceOrientationEvent" in window) {
+        headingHandler = onOrientation;
+        window.addEventListener("deviceorientation", headingHandler);
+      }
+    };
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      DeviceOrientationEvent.requestPermission().then(function (state) {
+        if (state === "granted") attach();
+      }).catch(function () {});
+    } else {
+      attach();
+    }
+  }
+
+  function stopOrientation() {
+    if (headingHandler) {
+      window.removeEventListener("deviceorientationabsolute", headingHandler);
+      window.removeEventListener("deviceorientation", headingHandler);
+      headingHandler = null;
+    }
+    if (CONFIG.MAP_ID && window.__doorstepMap && window.__doorstepMap.moveCamera) {
+      window.__doorstepMap.moveCamera({ heading: 0, tilt: 0 });
+    }
+    currentHeading = 0;
+    if (youMarker) updateMarkerRotation();
+  }
+
+  function startTracking() {
+    if (!navigator.geolocation) {
+      showMapBanner("Location isn't available in this browser.");
+      return;
+    }
+    tracking = true;
+    fabLocate.classList.add("active");
+    fabLocate.setAttribute("aria-pressed", "true");
+    watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000
+    });
+    startOrientation();
+  }
+
+  function stopTracking() {
+    tracking = false;
+    fabLocate.classList.remove("active");
+    fabLocate.setAttribute("aria-pressed", "false");
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    stopOrientation();
+  }
+
+  fabLocate.addEventListener("click", function () {
+    if (window.__doorstepMap) {
+      if (tracking) {
+        stopTracking();
+      } else {
+        startTracking();
+      }
     } else {
       var you = document.querySelector(".you-are-here");
       if (you) { you.style.left = "52%"; you.style.top = "58%"; }
@@ -216,61 +396,25 @@
   var mapBanner = document.getElementById("mapBanner");
   var mapBannerText = document.getElementById("mapBannerText");
 
-  function pctToLatLng(xPct, yPct) {
-    var center = CONFIG.MAP_CENTER || { lat: 42.5006, lng: -90.6648 };
-    var latSpread = 0.018;
-    var lngSpread = 0.03;
-    return {
-      lat: center.lat + ((50 - yPct) / 100) * latSpread,
-      lng: center.lng + ((xPct - 50) / 100) * lngSpread
-    };
-  }
-
   window.initDoorstepMap = function initDoorstepMap() {
     try {
-      var map = new google.maps.Map(document.getElementById("map"), {
+      var mapOptions = {
         center: CONFIG.MAP_CENTER,
         zoom: CONFIG.MAP_ZOOM || 15,
         disableDefaultUI: true,
-        zoomControl: true,
+        zoomControl: false,
         clickableIcons: false
-      });
+      };
+      if (CONFIG.MAP_ID) mapOptions.mapId = CONFIG.MAP_ID;
 
-      var markers = PINS.map(function (p) {
-        var pos = pctToLatLng(p[0], p[1]);
-        return new google.maps.Marker({
-          position: pos,
-          map: map,
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            scale: 7,
-            fillColor: STATUS_COLOR[p[2]],
-            fillOpacity: 1,
-            strokeColor: "#ffffff",
-            strokeWeight: 2
-          }
-        });
-      });
-
-      new google.maps.Marker({
-        position: CONFIG.MAP_CENTER,
-        map: map,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 6,
-          fillColor: "#0f6e64",
-          fillOpacity: 1,
-          strokeColor: "#ffffff",
-          strokeWeight: 3
-        },
-        zIndex: 999
-      });
+      var map = new google.maps.Map(document.getElementById("map"), mapOptions);
 
       window.__doorstepMap = map;
-      window.__doorstepMarkers = markers;
 
       mapFallback.hidden = true;
       mapBanner.hidden = true;
+
+      setupSearch();
     } catch (err) {
       showMapBanner("Map failed to load — check the API key and its referrer restrictions in config.js.");
     }
@@ -288,7 +432,7 @@
       return;
     }
     var script = document.createElement("script");
-    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&callback=initDoorstepMap";
+    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&libraries=places&callback=initDoorstepMap";
     script.async = true;
     script.defer = true;
     script.onerror = function () {

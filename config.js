@@ -14,9 +14,16 @@
 // preview map so the rest of the UI still works without one.
 
 window.DOORSTEP_CONFIG = {
-    GOOGLE_MAPS_API_KEY: "",
+  GOOGLE_MAPS_API_KEY: "",
 
-    // Default map center — Dubuque, IA. Swap for wherever you're canvassing.
-    MAP_CENTER: { lat: 42.5006, lng: -90.6648 },
-    MAP_ZOOM: 15
+  // Default map center — Dubuque, IA. Swap for wherever you're canvassing.
+  MAP_CENTER: { lat: 42.5006, lng: -90.6648 },
+  MAP_ZOOM: 15,
+
+  // Optional. A Google Maps "Map ID" (Cloud Console -> Maps Management ->
+  // Map IDs) turns on vector rendering, which lets the map itself rotate
+  // to face the direction the user is walking during live location
+  // tracking. Leave blank and everything still works — the map just stays
+  // north-up, with a rotating arrow marker showing facing direction instead.
+  MAP_ID: ""
 };

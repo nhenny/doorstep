@@ -12,7 +12,7 @@
 // placeholder preview map so the rest of the UI still works.
 
 window.DOORSTEP_CONFIG = {
-  GOOGLE_MAPS_API_KEY: "",
+  GOOGLE_MAPS_API_KEY: "AIzaSyDp2jU9uTWfJYS5NakI6Tn2OukZgO5Tk_Q",
 
   // Default map center — Dubuque, IA. Swap for wherever you're canvassing.
   MAP_CENTER: { lat: 42.5006, lng: -90.6648 },

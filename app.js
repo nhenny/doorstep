@@ -228,19 +228,29 @@
     }
   });
 
+  var geocoder = null;
   function setupSearch() {
-    if (!window.google || !google.maps.places || !window.__doorstepMap) return;
-    var autocomplete = new google.maps.places.Autocomplete(searchInput, {
-      fields: ["geometry", "name"]
+    if (!window.google || !window.__doorstepMap) return;
+    geocoder = new google.maps.Geocoder();
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      runSearch(searchInput.value.trim());
     });
-    autocomplete.bindTo("bounds", window.__doorstepMap);
-    autocomplete.addListener("place_changed", function () {
-      var place = autocomplete.getPlace();
-      if (!place.geometry || !place.geometry.location) return;
-      if (place.geometry.viewport) {
-        window.__doorstepMap.fitBounds(place.geometry.viewport);
+  }
+
+  function runSearch(query) {
+    if (!query || !geocoder || !window.__doorstepMap) return;
+    geocoder.geocode({ address: query }, function (results, status) {
+      if (status !== "OK" || !results || !results[0]) {
+        showMapBanner('Couldn’t find "' + query + '" — try a more specific address or city.');
+        return;
+      }
+      var result = results[0];
+      if (result.geometry.viewport) {
+        window.__doorstepMap.fitBounds(result.geometry.viewport);
       } else {
-        window.__doorstepMap.panTo(place.geometry.location);
+        window.__doorstepMap.panTo(result.geometry.location);
         window.__doorstepMap.setZoom(16);
       }
     });
@@ -432,7 +442,7 @@
       return;
     }
     var script = document.createElement("script");
-    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&libraries=places&callback=initDoorstepMap";
+    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&callback=initDoorstepMap";
     script.async = true;
     script.defer = true;
     script.onerror = function () {

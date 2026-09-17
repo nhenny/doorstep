@@ -4,22 +4,24 @@
   var CONFIG = window.DOORSTEP_CONFIG || {};
 
   // ---------------------------------------------------------------------
-  // Example data. Structure is real (walk list -> area list -> houses);
-  // the names and counts are placeholders until this reads from a backend.
+  // Placeholder data. Structure is real (book -> lists -> areas -> houses);
+  // the counts are placeholders until this reads from a backend. Default
+  // names here are overridden by whatever the user has renamed things to
+  // (see getBookName/getListName below).
   // ---------------------------------------------------------------------
   var DATA = [
-    { id: "wl1", name: "Example Walk List 1", areas: [
-      { id: "a1", name: "Example Area 1", total: 18, done: 6 },
-      { id: "a2", name: "Example Area 2", total: 24, done: 0 },
-      { id: "a3", name: "Example Area 3", total: 12, done: 12 }
+    { id: "wl1", name: "List 1", areas: [
+      { id: "a1", name: "Area 1", total: 18, done: 6 },
+      { id: "a2", name: "Area 2", total: 24, done: 0 },
+      { id: "a3", name: "Area 3", total: 12, done: 12 }
     ]},
-    { id: "wl2", name: "Example Walk List 2", areas: [
-      { id: "a4", name: "Example Area 4", total: 30, done: 10 },
-      { id: "a5", name: "Example Area 5", total: 15, done: 3 }
+    { id: "wl2", name: "List 2", areas: [
+      { id: "a4", name: "Area 4", total: 30, done: 10 },
+      { id: "a5", name: "Area 5", total: 15, done: 3 }
     ]},
-    { id: "wl3", name: "Example Walk List 3", areas: [
-      { id: "a6", name: "Example Area 6", total: 20, done: 0 },
-      { id: "a7", name: "Example Area 7", total: 22, done: 22 }
+    { id: "wl3", name: "List 3", areas: [
+      { id: "a6", name: "Area 6", total: 20, done: 0 },
+      { id: "a7", name: "Area 7", total: 22, done: 22 }
     ]}
   ];
 
@@ -39,6 +41,82 @@
   var backdrop = document.getElementById("panelBackdrop");
   var triggerValue = document.getElementById("triggerValue");
   var statValue = document.getElementById("statValue");
+
+  // ---------------------------------------------------------------------
+  // Editable names: the walkbook's own name, and each list's name. Stored
+  // locally, overriding the defaults in DATA once the user renames
+  // something — DATA itself is never mutated.
+  // ---------------------------------------------------------------------
+  var BOOK_NAME_KEY = "doorstep.bookName";
+  var LIST_NAME_PREFIX = "doorstep.listName.";
+
+  function getBookName() {
+    try { return localStorage.getItem(BOOK_NAME_KEY) || "Walkbook"; } catch (e) { return "Walkbook"; }
+  }
+  function setBookName(name) {
+    try { localStorage.setItem(BOOK_NAME_KEY, name); } catch (e) {}
+  }
+  function getListName(wl) {
+    try { return localStorage.getItem(LIST_NAME_PREFIX + wl.id) || wl.name; } catch (e) { return wl.name; }
+  }
+  function setListName(wlId, name) {
+    try { localStorage.setItem(LIST_NAME_PREFIX + wlId, name); } catch (e) {}
+  }
+
+  // A small "click the pencil to rename" control, shared by the walkbook's
+  // name and each list's name. Returns a DOM node; onSave(newName) fires
+  // once an edit is confirmed with a non-empty, changed value.
+  function createEditableRow(initialText, onSave) {
+    var container = document.createElement("span");
+    container.className = "editable-name";
+
+    var label = document.createElement("span");
+    label.className = "editable-name-text";
+    label.textContent = initialText;
+
+    function startEdit(e) {
+      e.stopPropagation();
+      if (container.querySelector(".editable-name-input")) return; // already editing
+      var input = document.createElement("input");
+      input.type = "text";
+      input.className = "editable-name-input";
+      input.value = label.textContent;
+      input.maxLength = 60;
+      container.replaceChild(input, label);
+      input.focus();
+      input.select();
+
+      function finish(save) {
+        var newVal = input.value.trim();
+        if (save && newVal && newVal !== label.textContent) {
+          label.textContent = newVal;
+          onSave(newVal);
+        }
+        if (input.parentNode === container) container.replaceChild(label, input);
+      }
+      input.addEventListener("blur", function () { finish(true); });
+      input.addEventListener("keydown", function (ev) {
+        ev.stopPropagation();
+        if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+        else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+      });
+      input.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    }
+
+    var editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "rename-btn";
+    editBtn.setAttribute("aria-label", "Rename");
+    editBtn.innerHTML =
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+      '<path d="M4 20l4.6-1 10.1-10.1a2 2 0 0 0 0-2.8l-1.3-1.3a2 2 0 0 0-2.8 0L4.5 15l-1 4.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+      '</svg>';
+    editBtn.addEventListener("click", startEdit);
+
+    container.appendChild(label);
+    container.appendChild(editBtn);
+    return container;
+  }
 
   // ---------------------------------------------------------------------
   // Real stops: addresses geocoded + route-optimized per area, stored
@@ -93,7 +171,10 @@
     panelInner.innerHTML = "";
     var heading = document.createElement("div");
     heading.className = "panel-heading";
-    heading.textContent = "Walk lists";
+    heading.appendChild(createEditableRow(getBookName(), function (newName) {
+      setBookName(newName);
+      if (!currentAreaId) triggerValue.textContent = newName;
+    }));
     panelInner.appendChild(heading);
 
     DATA.forEach(function (wl) {
@@ -108,12 +189,20 @@
         totalSum += c.total;
       });
 
+      var row = document.createElement("div");
+      row.className = "walklist-row";
+
+      var nameWrap = document.createElement("div");
+      nameWrap.className = "wl-name-wrap";
+      nameWrap.appendChild(createEditableRow(getListName(wl), function (newName) {
+        setListName(wl.id, newName);
+      }));
+
       var btn = document.createElement("button");
       btn.className = "walklist-btn";
       btn.setAttribute("aria-expanded", "false");
       btn.id = "btn-" + wl.id;
       btn.innerHTML =
-        '<span class="wl-name">' + wl.name + '</span>' +
         '<span class="wl-meta">' + doneSum + '/' + totalSum + '</span>' +
         '<svg class="chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
         '<path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -128,6 +217,9 @@
           btn.setAttribute("aria-expanded", "true");
         }
       });
+
+      row.appendChild(nameWrap);
+      row.appendChild(btn);
 
       var areaWrap = document.createElement("div");
       areaWrap.className = "arealist";
@@ -166,7 +258,7 @@
         areaWrap.appendChild(row);
       });
 
-      wrap.appendChild(btn);
+      wrap.appendChild(row);
       wrap.appendChild(areaWrap);
       panelInner.appendChild(wrap);
     });
@@ -225,6 +317,7 @@
   });
 
   renderPanel();
+  triggerValue.textContent = getBookName();
 
   try {
     var saved = localStorage.getItem("doorstep.selectedArea");

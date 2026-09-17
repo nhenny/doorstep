@@ -109,16 +109,33 @@ button{font-family:inherit;}
 }
 .panel.open{max-height:70vh; opacity:1; transform:translateY(0); overflow-y:auto;}
 .panel-inner{padding:8px;}
-.panel-heading{font-size:10.5px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink);padding:8px 10px 4px;}
+.panel-heading{padding:8px 10px 4px;}
+.panel-heading .editable-name-text{font-size:10.5px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink);}
+.panel-heading .editable-name-input{font-size:10.5px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink);}
+
+.editable-name{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;}
+.editable-name-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.editable-name-input{
+  font:inherit;color:inherit;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:6px;padding:1px 6px;min-width:0;width:100%;
+}
+.rename-btn{
+  flex:0 0 auto;width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+  background:transparent;border:none;border-radius:6px;color:var(--ink);opacity:0.45;cursor:pointer;
+}
+.rename-btn:hover{opacity:1;background:var(--surface-2);}
 
 .walklist{border-bottom:1px solid var(--border);}
 .walklist:last-child{border-bottom:none;}
+.walklist-row{display:flex;align-items:center;gap:2px;border-radius:10px;}
+.walklist-row:hover{background:var(--surface-2);}
+.wl-name-wrap{flex:1;min-width:0;padding:11px 4px 11px 10px;}
+.wl-name-wrap .editable-name-text{font-family:"Manrope",sans-serif;font-weight:700;font-size:14px;color:var(--ink);}
+.wl-name-wrap .editable-name-input{font-family:"Manrope",sans-serif;font-weight:700;font-size:14px;}
 .walklist-btn{
-  width:100%; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  flex:0 0 auto; display:flex; align-items:center; gap:8px;
   background:transparent; border:none; padding:11px 10px; cursor:pointer; color:var(--ink); border-radius:10px;
 }
-.walklist-btn:hover{background:var(--surface-2);}
-.walklist-btn .wl-name{font-family:"Manrope",sans-serif;font-weight:700;font-size:14px;color:var(--ink);}
 .walklist-btn .wl-meta{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink);}
 .walklist-btn .chevron{width:16px;height:16px;}
 

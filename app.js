@@ -717,9 +717,19 @@
   // ZERO_RESULTS — it quietly falls back to the surrounding city or county
   // instead (flagged with partial_match + a broad "political" type) which,
   // taken at face value, drops the pin miles from the real house and stacks
-  // every unfindable address from the same list on top of one another. Only
-  // trust a result that actually names a street, route, or premise.
-  var PRECISE_TYPES = { street_address: 1, premise: 1, subpremise: 1, route: 1, intersection: 1 };
+  // every unfindable address from the same list on top of one another.
+  //
+  // A "route" (or "intersection") match is the same problem in disguise:
+  // it means Google couldn't find that specific house number and instead
+  // handed back a single point somewhere along the whole road — every other
+  // house number on that road gets the exact same coordinate, and for a
+  // long rural county road that point can be miles from the real address
+  // (this is why pins for rural addresses were landing scattered across
+  // the whole region instead of clustered where they actually are). Only
+  // a result Google could actually pin to a specific address or premise
+  // counts as precise; a route/intersection match is treated as "couldn't
+  // find" instead, same as a city/county-level fallback.
+  var PRECISE_TYPES = { street_address: 1, premise: 1, subpremise: 1 };
   function isPreciseMatch(result) {
     var types = result.types || [];
     for (var i = 0; i < types.length; i++) {

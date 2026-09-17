@@ -42,6 +42,20 @@
         </div>
       </div>
 
+      <div class="stops-backdrop" id="stopsBackdrop"></div>
+      <div class="stops-modal" id="stopsModal" role="dialog" aria-label="Add addresses">
+        <div class="stops-modal-inner">
+          <div class="stops-modal-heading">Add addresses <span id="stopsAreaName"></span></div>
+          <p class="stops-modal-hint">Paste one address per line. We'll look each one up and build the fastest walking route between them.</p>
+          <textarea id="stopsInput" rows="6" placeholder="123 Main St, Dubuque, IA&#10;456 Elm St, Dubuque, IA"></textarea>
+          <div class="stops-modal-status" id="stopsStatus" hidden></div>
+          <div class="stops-modal-actions">
+            <button type="button" class="btn-secondary" id="stopsCancelBtn">Cancel</button>
+            <button type="button" class="btn-primary" id="stopsBuildBtn">Build route</button>
+          </div>
+        </div>
+      </div>
+
       <div class="map-wrap" id="mapWrap">
         <div id="map"></div>
 

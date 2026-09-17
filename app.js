@@ -23,6 +23,13 @@
     ]}
   ];
 
+  var STATUS_COLOR = {
+    done: "#38c77f",
+    notyet: "#e0a94c",
+    refused: "#e2685c",
+    upcoming: "#6b7480"
+  };
+
   // ---------------------------------------------------------------------
   // Walk list / area list dropdown
   // ---------------------------------------------------------------------
@@ -33,9 +40,43 @@
   var triggerValue = document.getElementById("triggerValue");
   var statValue = document.getElementById("statValue");
 
-  function statusDotColor(area) {
-    if (area.done === 0) return "var(--status-upcoming)";
-    if (area.done === area.total) return "var(--status-done)";
+  // ---------------------------------------------------------------------
+  // Real stops: addresses geocoded + route-optimized per area, stored
+  // locally. Falls back to the example total/done counts above until an
+  // area has real addresses added via the "+" button next to it.
+  // ---------------------------------------------------------------------
+  var STOPS_KEY_PREFIX = "doorstep.stops.";
+  var currentAreaId = null;
+
+  function loadStopsForArea(areaId) {
+    try {
+      var raw = localStorage.getItem(STOPS_KEY_PREFIX + areaId);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function saveStopsForArea(areaId, stops) {
+    try { localStorage.setItem(STOPS_KEY_PREFIX + areaId, JSON.stringify(stops)); } catch (e) {}
+  }
+  function findAreaById(id) {
+    for (var i = 0; i < DATA.length; i++) {
+      for (var j = 0; j < DATA[i].areas.length; j++) {
+        if (DATA[i].areas[j].id === id) return DATA[i].areas[j];
+      }
+    }
+    return null;
+  }
+  function getAreaCounts(area) {
+    var stops = loadStopsForArea(area.id);
+    if (stops && stops.length) {
+      var done = stops.filter(function (s) { return s.status === "done"; }).length;
+      return { total: stops.length, done: done };
+    }
+    return { total: area.total, done: area.done };
+  }
+
+  function statusDotColor(counts) {
+    if (counts.done === 0) return "var(--status-upcoming)";
+    if (counts.done === counts.total) return "var(--status-done)";
     return "var(--status-notyet)";
   }
 
@@ -51,8 +92,12 @@
       wrap.className = "walklist";
       wrap.id = "wrap-" + wl.id;
 
-      var doneSum = wl.areas.reduce(function (s, a) { return s + a.done; }, 0);
-      var totalSum = wl.areas.reduce(function (s, a) { return s + a.total; }, 0);
+      var doneSum = 0, totalSum = 0;
+      wl.areas.forEach(function (a) {
+        var c = getAreaCounts(a);
+        doneSum += c.done;
+        totalSum += c.total;
+      });
 
       var btn = document.createElement("button");
       btn.className = "walklist-btn";
@@ -79,17 +124,37 @@
       areaWrap.className = "arealist";
 
       wl.areas.forEach(function (area) {
+        var counts = getAreaCounts(area);
+
+        var row = document.createElement("div");
+        row.className = "area-row";
+
         var aBtn = document.createElement("button");
         aBtn.className = "area-btn";
         aBtn.id = "area-" + area.id;
         aBtn.innerHTML =
-          '<span class="dot" style="background:' + statusDotColor(area) + '"></span>' +
+          '<span class="dot" style="background:' + statusDotColor(counts) + '"></span>' +
           '<span class="a-name">' + area.name + '</span>' +
-          '<span class="a-progress">' + area.done + '/' + area.total + '</span>';
+          '<span class="a-progress">' + counts.done + '/' + counts.total + '</span>';
         aBtn.addEventListener("click", function () {
           selectArea(area, aBtn);
         });
-        areaWrap.appendChild(aBtn);
+
+        var stopsBtn = document.createElement("button");
+        stopsBtn.className = "stops-btn";
+        stopsBtn.type = "button";
+        stopsBtn.setAttribute("aria-label", "Add addresses for " + area.name);
+        stopsBtn.innerHTML =
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+          '<path d="M12 21C12 21 5 14.5 5 9.5C5 5.9 8.1 3 12 3C15.9 3 19 5.9 19 9.5C19 14.5 12 21 12 21Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+          '<path d="M12 7V12M9.5 9.5H14.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+        stopsBtn.addEventListener("click", function () {
+          openStopsModal(area);
+        });
+
+        row.appendChild(aBtn);
+        row.appendChild(stopsBtn);
+        areaWrap.appendChild(row);
       });
 
       wrap.appendChild(btn);
@@ -98,15 +163,33 @@
     });
   }
 
+  function refreshAreaMeta() {
+    renderPanel();
+    try {
+      var saved = localStorage.getItem("doorstep.selectedArea");
+      if (saved) {
+        var el = document.getElementById("area-" + saved);
+        if (el) el.classList.add("selected");
+      }
+    } catch (e) {}
+  }
+
+  function activateArea(area) {
+    currentAreaId = area.id;
+    triggerValue.textContent = area.name;
+    var counts = getAreaCounts(area);
+    statValue.textContent = (counts.total - counts.done) + " of " + counts.total + " stops left";
+    try { localStorage.setItem("doorstep.selectedArea", area.id); } catch (e) {}
+    showStopsForArea(area);
+  }
+
   function selectArea(area, aBtn) {
     document.querySelectorAll(".area-btn.selected").forEach(function (b) {
       b.classList.remove("selected");
     });
     aBtn.classList.add("selected");
-    triggerValue.textContent = area.name;
-    statValue.textContent = (area.total - area.done) + " of " + area.total + " stops left";
+    activateArea(area);
     closePanel();
-    try { localStorage.setItem("doorstep.selectedArea", area.id); } catch (e) {}
   }
 
   function openPanel() {
@@ -137,16 +220,9 @@
   try {
     var saved = localStorage.getItem("doorstep.selectedArea");
     if (saved) {
-      outer:
-      for (var i = 0; i < DATA.length; i++) {
-        for (var j = 0; j < DATA[i].areas.length; j++) {
-          if (DATA[i].areas[j].id === saved) {
-            var el = document.getElementById("area-" + saved);
-            if (el) selectArea(DATA[i].areas[j], el);
-            break outer;
-          }
-        }
-      }
+      var savedArea = findAreaById(saved);
+      var el = document.getElementById("area-" + saved);
+      if (savedArea && el) selectArea(savedArea, el);
     }
   } catch (e) {}
 
@@ -254,6 +330,207 @@
         window.__doorstepMap.setZoom(16);
       }
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Add addresses -> geocode -> optimized walking route
+  // ---------------------------------------------------------------------
+  var stopsBackdrop = document.getElementById("stopsBackdrop");
+  var stopsModal = document.getElementById("stopsModal");
+  var stopsAreaName = document.getElementById("stopsAreaName");
+  var stopsInput = document.getElementById("stopsInput");
+  var stopsStatus = document.getElementById("stopsStatus");
+  var stopsBuildBtn = document.getElementById("stopsBuildBtn");
+  var stopsCancelBtn = document.getElementById("stopsCancelBtn");
+  var activeStopsArea = null;
+
+  function openStopsModal(area) {
+    activeStopsArea = area;
+    closePanel();
+    stopsAreaName.textContent = "— " + area.name;
+    var existing = loadStopsForArea(area.id);
+    stopsInput.value = existing ? existing.slice().sort(function (a, b) { return a.order - b.order; }).map(function (s) { return s.address; }).join("\n") : "";
+    stopsStatus.hidden = true;
+    stopsBuildBtn.disabled = false;
+    stopsModal.classList.add("open");
+    stopsBackdrop.classList.add("open");
+    window.setTimeout(function () { stopsInput.focus(); }, 150);
+  }
+  function closeStopsModal() {
+    stopsModal.classList.remove("open");
+    stopsBackdrop.classList.remove("open");
+    activeStopsArea = null;
+  }
+  stopsCancelBtn.addEventListener("click", closeStopsModal);
+  stopsBackdrop.addEventListener("click", closeStopsModal);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && stopsModal.classList.contains("open")) closeStopsModal();
+  });
+
+  function setStopsStatus(text, isError) {
+    stopsStatus.textContent = text;
+    stopsStatus.hidden = false;
+    stopsStatus.classList.toggle("error", !!isError);
+  }
+
+  stopsBuildBtn.addEventListener("click", function () {
+    if (!activeStopsArea) return;
+    var lines = stopsInput.value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+    if (!lines.length) { setStopsStatus("Add at least one address.", true); return; }
+    if (!window.__doorstepMap || !window.google) { setStopsStatus("The map isn't loaded yet — try again in a moment.", true); return; }
+    buildRoute(activeStopsArea, lines);
+  });
+
+  function geocodeAll(addresses, callback) {
+    if (!geocoder) geocoder = new google.maps.Geocoder();
+    var results = [];
+    var failed = [];
+    var i = 0;
+    function next() {
+      if (i >= addresses.length) {
+        if (!results.length) { callback("Couldn't find any of those addresses. Try including city and state."); return; }
+        callback(null, results, failed);
+        return;
+      }
+      var addr = addresses[i++];
+      geocoder.geocode({ address: addr }, function (res, status) {
+        if (status === "OK" && res && res[0]) {
+          results.push({ address: addr, lat: res[0].geometry.location.lat(), lng: res[0].geometry.location.lng() });
+        } else {
+          failed.push(addr);
+        }
+        window.setTimeout(next, 180); // stay well under Geocoding's per-second rate limit
+      });
+    }
+    next();
+  }
+
+  function optimizeRoute(points, callback) {
+    if (points.length <= 2) { callback(null, points); return; }
+    if (!window.__directionsService) window.__directionsService = new google.maps.DirectionsService();
+    var origin = points[0];
+    var destination = points[points.length - 1];
+    var waypoints = points.slice(1, -1).map(function (p) {
+      return { location: { lat: p.lat, lng: p.lng }, stopover: true };
+    });
+    window.__directionsService.route({
+      origin: { lat: origin.lat, lng: origin.lng },
+      destination: { lat: destination.lat, lng: destination.lng },
+      waypoints: waypoints,
+      optimizeWaypoints: true,
+      travelMode: google.maps.TravelMode.WALKING
+    }, function (result, status) {
+      if (status !== "OK" || !result) {
+        callback(null, points); // fall back to the order they were typed in
+        return;
+      }
+      var order = result.routes[0].waypoint_order;
+      var ordered = [origin];
+      order.forEach(function (idx) { ordered.push(points[1 + idx]); });
+      ordered.push(destination);
+      callback(null, ordered);
+    });
+  }
+
+  function buildRoute(area, addresses) {
+    stopsBuildBtn.disabled = true;
+    setStopsStatus("Looking up " + addresses.length + " address" + (addresses.length === 1 ? "" : "es") + "…");
+    geocodeAll(addresses, function (err, geocoded, failed) {
+      if (err) {
+        stopsBuildBtn.disabled = false;
+        setStopsStatus(err, true);
+        return;
+      }
+      setStopsStatus("Building the fastest walking route…");
+      optimizeRoute(geocoded, function (err2, ordered) {
+        stopsBuildBtn.disabled = false;
+        if (err2) { setStopsStatus(err2, true); return; }
+        var stops = ordered.map(function (o, i) {
+          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i };
+        });
+        saveStopsForArea(area.id, stops);
+        var areaBtnEl = document.getElementById("area-" + area.id);
+        if (areaBtnEl) {
+          document.querySelectorAll(".area-btn.selected").forEach(function (b) { b.classList.remove("selected"); });
+          areaBtnEl.classList.add("selected");
+        }
+        closeStopsModal();
+        activateArea(area);
+        refreshAreaMeta();
+        if (failed && failed.length) {
+          showMapBanner("Route built, but couldn't find: " + failed.join(", "));
+        }
+      });
+    });
+  }
+
+  // ---- Stop markers + route line on the map ----
+  var STATUS_CYCLE = ["upcoming", "done", "notyet", "refused"];
+  var stopMarkers = [];
+  var stopPolyline = null;
+
+  function clearStopMarkers() {
+    stopMarkers.forEach(function (m) { m.setMap(null); });
+    stopMarkers = [];
+    if (stopPolyline) { stopPolyline.setMap(null); stopPolyline = null; }
+  }
+
+  function showStopsForArea(area) {
+    clearStopMarkers();
+    if (!window.__doorstepMap) return;
+    var stops = loadStopsForArea(area.id);
+    if (stops && stops.length) renderStopsOnMap(area, stops);
+  }
+
+  function stopIcon(status) {
+    return {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 12,
+      fillColor: STATUS_COLOR[status] || STATUS_COLOR.upcoming,
+      fillOpacity: 1,
+      strokeColor: "#ffffff",
+      strokeWeight: 2
+    };
+  }
+
+  function renderStopsOnMap(area, stops) {
+    clearStopMarkers();
+    if (!window.__doorstepMap || !stops.length) return;
+    var path = [];
+    stops.forEach(function (stop, i) {
+      var pos = { lat: stop.lat, lng: stop.lng };
+      path.push(pos);
+      var marker = new google.maps.Marker({
+        position: pos,
+        map: window.__doorstepMap,
+        label: { text: String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
+        icon: stopIcon(stop.status),
+        title: stop.address,
+        zIndex: 500
+      });
+      marker.addListener("click", function () {
+        var idx = STATUS_CYCLE.indexOf(stop.status);
+        stop.status = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+        marker.setIcon(stopIcon(stop.status));
+        saveStopsForArea(area.id, stops);
+        if (currentAreaId === area.id) {
+          var counts = getAreaCounts(area);
+          statValue.textContent = (counts.total - counts.done) + " of " + counts.total + " stops left";
+        }
+        refreshAreaMeta();
+      });
+      stopMarkers.push(marker);
+    });
+    stopPolyline = new google.maps.Polyline({
+      path: path,
+      map: window.__doorstepMap,
+      strokeColor: "#2fd6c3",
+      strokeOpacity: 0.85,
+      strokeWeight: 3
+    });
+    var bounds = new google.maps.LatLngBounds();
+    path.forEach(function (p) { bounds.extend(p); });
+    window.__doorstepMap.fitBounds(bounds, 60);
   }
 
   // ---- Personal location: recenter + live tracking + heading rotation ----
@@ -425,6 +702,11 @@
       mapBanner.hidden = true;
 
       setupSearch();
+
+      if (currentAreaId) {
+        var activeArea = findAreaById(currentAreaId);
+        if (activeArea) showStopsForArea(activeArea);
+      }
     } catch (err) {
       showMapBanner("Map failed to load — check the API key and its referrer restrictions in config.js.");
     }

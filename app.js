@@ -620,6 +620,21 @@
     );
   }
 
+  // When Google can't actually place an address, it often doesn't say
+  // ZERO_RESULTS — it quietly falls back to the surrounding city or county
+  // instead (flagged with partial_match + a broad "political" type) which,
+  // taken at face value, drops the pin miles from the real house and stacks
+  // every unfindable address from the same list on top of one another. Only
+  // trust a result that actually names a street, route, or premise.
+  var PRECISE_TYPES = { street_address: 1, premise: 1, subpremise: 1, route: 1, intersection: 1 };
+  function isPreciseMatch(result) {
+    var types = result.types || [];
+    for (var i = 0; i < types.length; i++) {
+      if (PRECISE_TYPES[types[i]]) return true;
+    }
+    return false;
+  }
+
   function geocodeNear(address, anchor, callback) {
     var i = 0;
     function tryTier() {
@@ -627,7 +642,8 @@
         // Widened all the way out and still nothing close — take whatever
         // Google's plain, unbiased answer is, as a last resort.
         geocoder.geocode({ address: address }, function (res, status) {
-          callback(status === "OK" && res && res[0] ? res[0] : null);
+          var match = status === "OK" && res ? res.filter(isPreciseMatch)[0] : null;
+          callback(match || null);
         });
         return;
       }
@@ -635,17 +651,18 @@
       geocoder.geocode({ address: address, bounds: boundsAround(anchor, radius) }, function (res, status) {
         if (status === "OK" && res && res.length) {
           // "bounds" only biases Google's results, it doesn't restrict them,
-          // so pick whichever candidate is actually nearest the user before
-          // deciding this tier found a real match.
+          // so pick whichever precise candidate is actually nearest the user
+          // before deciding this tier found a real match.
           var best = null, bestDist = Infinity;
           res.forEach(function (r) {
+            if (!isPreciseMatch(r)) return; // skip city/county-level fallbacks
             var loc = r.geometry.location;
             var d = milesBetween(anchor, { lat: loc.lat(), lng: loc.lng() });
             if (d < bestDist) { bestDist = d; best = r; }
           });
           if (best && bestDist <= radius * 1.5) { callback(best); return; }
         }
-        tryTier(); // nothing close enough yet — widen the search outward
+        tryTier(); // nothing close enough (or precise enough) yet — widen out
       });
     }
     tryTier();

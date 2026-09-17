@@ -794,18 +794,19 @@
     tryTier();
   }
 
-  // A government address locator, when one is configured for the area being
-  // canvassed, gives real rooftop-level address data instead of Google's
-  // best guess — exactly the fix that solved this same "address not found"
-  // problem on the Alliant utility-map project: pull from an authoritative
-  // address-point dataset before ever falling back to Google. This one is
-  // an Esri "GeocodeServer" (the format most county/state GIS departments
-  // publish); it's tried first and, if it comes back empty, Google is still
-  // there as the fallback. Leave CONFIG.LOCATOR_URL blank to skip this and
-  // go straight to Google.
-  function geocodeLocator(address, anchor, callback) {
-    var base = CONFIG.LOCATOR_URL;
-    if (!base) { callback(null); return; }
+  // Government address locators, when configured for the area being
+  // canvassed, give real address-point data instead of Google's best guess
+  // — exactly the fix that solved this same "address not found" problem on
+  // the Alliant utility-map project: pull from authoritative datasets
+  // before ever falling back to Google. Every URL in CONFIG.LOCATOR_URLS is
+  // an Esri "GeocodeServer" (the format most county/state/regional GIS
+  // departments publish); they're all queried IN PARALLEL and the best hit
+  // across all of them wins, so a second or third dataset only adds
+  // coverage — it never slows things down waiting on ones that come up
+  // empty. If none of them find anything, Google is still there as the
+  // fallback. Leave CONFIG.LOCATOR_URLS empty to skip this and go straight
+  // to Google.
+  function geocodeEsriLocator(base, address, anchor, callback) {
     var url = base + "?" + [
       "SingleLine=" + encodeURIComponent(address),
       "location=" + encodeURIComponent(anchor.lng + "," + anchor.lat),
@@ -834,6 +835,9 @@
       var best = candidates
         .filter(function (c) {
           var addrType = c.attributes && c.attributes.Addr_type;
+          // A regional dataset can occasionally match the right house
+          // number on a similarly-named road in the wrong county — a high
+          // score floor is what keeps that from being accepted.
           return c.score >= 80 && (addrType === "PointAddress" || addrType === "StreetAddress");
         })
         .sort(function (a, b) { return b.score - a.score; })[0];
@@ -843,12 +847,103 @@
       // guess, but still an estimate, so it's flagged "approx" the same way
       // a Google RANGE_INTERPOLATED match is below.
       var addrType = best.attributes && best.attributes.Addr_type;
-      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress" });
+      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress", score: best.score });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
-      callback(null); // network hiccup, CORS, or the service is down — just fall through to Google
+      callback(null); // network hiccup, CORS, or the service is down — just don't count this source
     });
+  }
+
+  // Splits "12481 Memory Ln" into { num: 12481, streetRaw: "MEMORY LN" }.
+  // Addresses that don't start with a house number (a bad OCR read, a lot
+  // number with no street) can't be looked up this way — null tells the
+  // caller to skip this source for that address.
+  function parseHouseAndStreet(address) {
+    var m = /^\s*(\d+)\s+(.+)$/.exec((address || "").trim());
+    if (!m) return null;
+    return { num: parseInt(m[1], 10), streetRaw: m[2].trim().toUpperCase() };
+  }
+
+  // Montgomery County's own E-911 address-point layer isn't a geocoder —
+  // it's a raw, queryable table of real addresses (house number + street +
+  // exact lat/lng), so instead of a fuzzy text search we query it directly:
+  // exact house number, then a loose LIKE on the street so it still matches
+  // whether the county spells it "County Rd" or "CR" or "County Road". The
+  // street-name abbreviation can vary, but a road's own number rarely does,
+  // so when the street name contains a number (e.g. "COUNTY ROAD 152") that
+  // number is the search hint; otherwise the first word of the name is
+  // ("MEMORY LN" -> "MEMORY"). Whatever candidates come back are then
+  // ranked client-side by how many words they actually share with the
+  // address typed in, since the loose LIKE alone can pull in more than one
+  // road with the same house number.
+  function geocodeCountyPoints(base, address, callback) {
+    var parsed = parseHouseAndStreet(address);
+    if (!parsed) { callback(null); return; }
+    var numHint = parsed.streetRaw.match(/\d+/);
+    var hint = numHint ? numHint[0] : (parsed.streetRaw.split(/\s+/)[0] || parsed.streetRaw);
+    var where = "STR_NUM=" + parsed.num + " AND STREET LIKE '%" + hint.replace(/'/g, "''") + "%'";
+    var url = base + "?" + [
+      "where=" + encodeURIComponent(where),
+      "outFields=STREET,ADDRESS,LATCOORDY,LONCOORDX",
+      "resultRecordCount=50",
+      "f=json"
+    ].join("&");
+
+    var timedOut = false;
+    var timer = window.setTimeout(function () { timedOut = true; callback(null); }, 6000);
+
+    fetch(url).then(function (res) {
+      return res.json();
+    }).then(function (json) {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      var feats = (json && json.features) || [];
+      if (!feats.length) { callback(null); return; }
+      var streetWords = parsed.streetRaw.split(/\s+/).filter(Boolean);
+      var best = null, bestOverlap = 0;
+      feats.forEach(function (f) {
+        var street = (f.attributes.STREET || "").toUpperCase();
+        var overlap = streetWords.filter(function (w) { return street.indexOf(w) !== -1; }).length;
+        if (overlap > bestOverlap) { bestOverlap = overlap; best = f; }
+      });
+      if (!best) { callback(null); return; }
+      // This is the county's own ground-truth 911 addressing data — a
+      // matched point is exact, not an estimate.
+      callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100 });
+    }).catch(function () {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      callback(null);
+    });
+  }
+
+  function geocodeLocator(address, anchor, callback) {
+    var tasks = [];
+    (CONFIG.LOCATOR_URLS || []).forEach(function (base) {
+      tasks.push(function (done) { geocodeEsriLocator(base, address, anchor, done); });
+    });
+    if (CONFIG.MONTGOMERY_POINTS_URL) {
+      tasks.push(function (done) { geocodeCountyPoints(CONFIG.MONTGOMERY_POINTS_URL, address, done); });
+    }
+    if (!tasks.length) { callback(null); return; }
+
+    var pending = tasks.length;
+    var found = [];
+    function taskDone(result) {
+      if (result) found.push(result);
+      pending--;
+      if (pending > 0) return;
+      if (!found.length) { callback(null); return; }
+      // A rooftop-precise hit beats an interpolated one from a different
+      // source even if the interpolated one scored higher internally.
+      found.sort(function (a, b) {
+        if (!!a.approx !== !!b.approx) return a.approx ? 1 : -1;
+        return (b.score || 0) - (a.score || 0);
+      });
+      callback(found[0]);
+    }
+    tasks.forEach(function (task) { task(taskDone); });
   }
 
   function geocodeOne(addr, anchor, callback) {

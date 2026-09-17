@@ -20,6 +20,12 @@ window.DOORSTEP_CONFIG = {
   MAP_CENTER: { lat: 42.5006, lng: -90.6648 },
   MAP_ZOOM: 15,
 
+  // Appended to any address that's missing a state abbreviation or ZIP code
+  // before we geocode it — rural/county-road addresses (e.g. "4951 County
+  // Road 152") often come without a city or state and Google's Geocoder
+  // can't disambiguate them otherwise. Swap for wherever you're canvassing.
+  DEFAULT_REGION: "Dubuque County, IA",
+
   // Optional. A Google Maps "Map ID" (Cloud Console -> Maps Management ->
   // Map IDs) turns on vector rendering, which lets the map itself rotate
   // to face the direction the user is walking during live location

@@ -57,6 +57,15 @@
   function saveStopsForArea(areaId, stops) {
     try { localStorage.setItem(STOPS_KEY_PREFIX + areaId, JSON.stringify(stops)); } catch (e) {}
   }
+  // Tracks whether an area's stops came from the optimized "Build route"
+  // flow (ordered, worth drawing a connecting line) or from a plain
+  // screenshot-to-pins upload (no particular walking order — no line).
+  function setStopsRouted(areaId, routed) {
+    try { localStorage.setItem(STOPS_KEY_PREFIX + areaId + ".routed", routed ? "1" : "0"); } catch (e) {}
+  }
+  function isStopsRouted(areaId) {
+    try { return localStorage.getItem(STOPS_KEY_PREFIX + areaId + ".routed") === "1"; } catch (e) { return false; }
+  }
   function findAreaById(id) {
     for (var i = 0; i < DATA.length; i++) {
       for (var j = 0; j < DATA[i].areas.length; j++) {
@@ -408,14 +417,78 @@
     return tesseractLoadPromise;
   }
 
-  function cleanOcrLines(text) {
-    return text
-      .split("\n")
-      .map(function (l) { return l.replace(/[|_~]+/g, " ").replace(/\s+/g, " ").trim(); })
-      .filter(function (l) {
-        // Keep lines that look address-like: has a digit and a real word in it.
-        return l.length >= 5 && /\d/.test(l) && /[A-Za-z]{2,}/.test(l);
+  // Recognize a household-list screenshot: pull out just the address and the
+  // list number next to it (the same number shown under the blue pin icon),
+  // ignoring names, statuses, and everything else in the row.
+  var STREET_SUFFIX_RE = /\b(ROAD|RD|STREET|ST|AVENUE|AVE|LANE|LN|DRIVE|DR|COURT|CT|BOULEVARD|BLVD|WAY|PLACE|PL|CIRCLE|CIR|HIGHWAY|HWY|PARKWAY|PKWY|TRAIL|TRL|ROUTE|RTE|COUNTY|LOOP|TERRACE|TER|CROSSING|XING|PATH|ALLEY|ALY|SQUARE|SQ|PLAZA|PLZ)\b/i;
+
+  function cleanAddressLine(text) {
+    var t = text;
+    var bracketIdx = t.indexOf("[");
+    if (bracketIdx !== -1) t = t.slice(0, bracketIdx);
+    t = t.replace(/\b(Not Started|In Progress|Completed|Restricted)\b.*$/i, "");
+    t = t.replace(/[>›→]+\s*$/, "");
+    return t.replace(/\s+/g, " ").trim();
+  }
+
+  function lineYCenter(bbox) { return (bbox.y0 + bbox.y1) / 2; }
+
+  // Pairs each address line with the nearest stray leading number in the
+  // same row band (the "1", "2", "3"... column), using OCR line positions
+  // rather than text order, since the two don't always come out adjacent.
+  function extractAddressNumberPairs(lines) {
+    var addressLines = [];
+    var numberLines = [];
+
+    lines.forEach(function (line) {
+      var text = (line.text || "").trim();
+      if (!text) return;
+      if (STREET_SUFFIX_RE.test(text)) {
+        var cleaned = cleanAddressLine(text);
+        if (cleaned.length >= 5 && /\d/.test(cleaned)) {
+          addressLines.push({ text: cleaned, bbox: line.bbox });
+        }
+        return;
+      }
+      var m = text.match(/^(\d{1,4})\b/);
+      if (m) numberLines.push({ num: m[1], bbox: line.bbox });
+    });
+
+    if (!addressLines.length) return [];
+
+    // Typical row height, from the gaps between consecutive address lines —
+    // used to keep a number from pairing with the wrong row.
+    var rowHeight = Infinity;
+    if (addressLines.length > 1) {
+      var gaps = [];
+      for (var i = 1; i < addressLines.length; i++) {
+        gaps.push(Math.abs(lineYCenter(addressLines[i].bbox) - lineYCenter(addressLines[i - 1].bbox)));
+      }
+      gaps.sort(function (a, b) { return a - b; });
+      rowHeight = gaps[Math.floor(gaps.length / 2)];
+    }
+    var threshold = isFinite(rowHeight) ? rowHeight * 0.75 : Infinity;
+
+    var used = new Array(numberLines.length).fill(false);
+    var pairs = addressLines.map(function (a) {
+      var bestIdx = -1, bestDist = Infinity;
+      numberLines.forEach(function (n, i) {
+        if (used[i]) return;
+        var d = Math.abs(lineYCenter(a.bbox) - lineYCenter(n.bbox));
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
       });
+      var label = null;
+      if (bestIdx !== -1 && bestDist <= threshold) {
+        used[bestIdx] = true;
+        label = numberLines[bestIdx].num;
+      }
+      return { address: a.text, label: label };
+    });
+
+    // Every pin still gets a number, even for a row we couldn't confidently match.
+    pairs.forEach(function (p, i) { if (!p.label) p.label = String(i + 1); });
+
+    return pairs;
   }
 
   stopsUploadBtn.addEventListener("click", function () {
@@ -425,7 +498,7 @@
   stopsImageInput.addEventListener("change", function () {
     var file = stopsImageInput.files && stopsImageInput.files[0];
     stopsImageInput.value = ""; // allow re-selecting the same file again later
-    if (!file) return;
+    if (!file || !activeStopsArea) return;
 
     setStopsBusy(true);
     setStopsStatus("Reading the screenshot…");
@@ -433,21 +506,67 @@
     loadTesseract()
       .then(function () { return Tesseract.recognize(file, "eng"); })
       .then(function (result) {
-        var text = result && result.data && result.data.text ? result.data.text : "";
-        var lines = cleanOcrLines(text);
-        if (!lines.length) {
+        var lines = (result && result.data && result.data.lines) || [];
+        var pairs = extractAddressNumberPairs(lines);
+        if (!pairs.length) {
+          setStopsBusy(false);
           setStopsStatus("Couldn't make out any addresses in that image — try a clearer screenshot, or paste the addresses instead.", true);
           return;
         }
-        var existing = stopsInput.value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
-        stopsInput.value = existing.concat(lines).join("\n");
-        setStopsStatus("Pulled " + lines.length + " line" + (lines.length === 1 ? "" : "s") + " from the image — double-check them below, then build the route.");
+        stopsInput.value = pairs.map(function (p) { return p.address; }).join("\n");
+        buildPinsFromImage(activeStopsArea, pairs);
       })
       .catch(function (err) {
+        setStopsBusy(false);
         setStopsStatus(err && err.message ? err.message : "Couldn't read that image.", true);
-      })
-      .then(function () { setStopsBusy(false); });
+      });
   });
+
+  // Places numbered pins straight on the map — no route optimization, just
+  // matching the numbers from the screenshot. "Build route" (above) stays
+  // available afterward for anyone who also wants an optimized order.
+  function buildPinsFromImage(area, pairs) {
+    setStopsStatus("Looking up " + pairs.length + " address" + (pairs.length === 1 ? "" : "es") + "…");
+    var addresses = pairs.map(function (p) { return p.address; });
+    geocodeAll(addresses, function (err, geocoded, failed) {
+      setStopsBusy(false);
+      if (err) { setStopsStatus(err, true); return; }
+      var stops = geocoded.map(function (g, i) {
+        var match = pairs.filter(function (p) { return p.address === g.address; })[0];
+        return {
+          address: g.address,
+          lat: g.lat,
+          lng: g.lng,
+          status: "upcoming",
+          order: i,
+          label: (match && match.label) || String(i + 1)
+        };
+      });
+      saveStopsForArea(area.id, stops);
+      setStopsRouted(area.id, false);
+      var areaBtnEl = document.getElementById("area-" + area.id);
+      if (areaBtnEl) {
+        document.querySelectorAll(".area-btn.selected").forEach(function (b) { b.classList.remove("selected"); });
+        areaBtnEl.classList.add("selected");
+      }
+      activateArea(area);
+      refreshAreaMeta();
+      selectTab("map");
+      var msg = "Added " + stops.length + " pin" + (stops.length === 1 ? "" : "s") + " to the map, numbered to match your screenshot.";
+      if (failed && failed.length) msg += " Couldn't find: " + failed.join(", ") + ".";
+      setStopsStatus(msg);
+    });
+  }
+
+  // Rural and unincorporated addresses (e.g. "4951 County Road 152") often
+  // have no city/state for Google to disambiguate against — fall back to a
+  // configured default region so those still geocode.
+  var STATE_ABBR_RE = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
+  function ensureRegion(address) {
+    if (STATE_ABBR_RE.test(address) || /\b\d{5}(-\d{4})?\b/.test(address)) return address;
+    var region = (CONFIG.DEFAULT_REGION || "").trim();
+    return region ? (address + ", " + region) : address;
+  }
 
   function geocodeAll(addresses, callback) {
     if (!geocoder) geocoder = new google.maps.Geocoder();
@@ -461,7 +580,7 @@
         return;
       }
       var addr = addresses[i++];
-      geocoder.geocode({ address: addr }, function (res, status) {
+      geocoder.geocode({ address: ensureRegion(addr) }, function (res, status) {
         if (status === "OK" && res && res[0]) {
           results.push({ address: addr, lat: res[0].geometry.location.lat(), lng: res[0].geometry.location.lng() });
         } else {
@@ -514,9 +633,10 @@
         setStopsBusy(false);
         if (err2) { setStopsStatus(err2, true); return; }
         var stops = ordered.map(function (o, i) {
-          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i };
+          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i, label: String(i + 1) };
         });
         saveStopsForArea(area.id, stops);
+        setStopsRouted(area.id, true);
         var areaBtnEl = document.getElementById("area-" + area.id);
         if (areaBtnEl) {
           document.querySelectorAll(".area-btn.selected").forEach(function (b) { b.classList.remove("selected"); });
@@ -572,7 +692,7 @@
       var marker = new google.maps.Marker({
         position: pos,
         map: window.__doorstepMap,
-        label: { text: String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
+        label: { text: stop.label || String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
         icon: stopIcon(stop.status),
         title: stop.address,
         zIndex: 500
@@ -590,13 +710,17 @@
       });
       stopMarkers.push(marker);
     });
-    stopPolyline = new google.maps.Polyline({
-      path: path,
-      map: window.__doorstepMap,
-      strokeColor: "#2fd6c3",
-      strokeOpacity: 0.85,
-      strokeWeight: 3
-    });
+    // Only draw a connecting line when these stops came from "Build route" —
+    // plain pins-from-a-screenshot aren't in any particular walking order.
+    if (isStopsRouted(area.id)) {
+      stopPolyline = new google.maps.Polyline({
+        path: path,
+        map: window.__doorstepMap,
+        strokeColor: "#2fd6c3",
+        strokeOpacity: 0.85,
+        strokeWeight: 3
+      });
+    }
     var bounds = new google.maps.LatLngBounds();
     path.forEach(function (p) { bounds.extend(p); });
     window.__doorstepMap.fitBounds(bounds, 60);

@@ -227,9 +227,9 @@ button{font-family:inherit;}
 .stops-backdrop{position:absolute; inset:0; background:var(--overlay); z-index:35; opacity:0; pointer-events:none; transition:opacity .18s ease;}
 .stops-backdrop.open{opacity:1; pointer-events:auto;}
 .stops-modal{
-  position:absolute; left:16px; right:16px; top:50%; z-index:40;
+  position:absolute; left:16px; right:16px; top:50%; z-index:40; max-height:86%;
   background:var(--surface); border:1px solid var(--border); border-radius:16px;
-  box-shadow:0 18px 40px var(--shadow);
+  box-shadow:0 18px 40px var(--shadow); overflow-y:auto;
   opacity:0; pointer-events:none; transform:translateY(-44%) scale(0.97);
   transition:opacity .18s ease, transform .18s ease;
 }
@@ -238,6 +238,11 @@ button{font-family:inherit;}
 .stops-modal-heading{font-family:"Manrope",sans-serif;font-weight:800;font-size:15px;color:var(--ink);}
 .stops-modal-heading span{font-weight:600; opacity:0.7;}
 .stops-modal-hint{font-size:12px;color:var(--ink);opacity:0.7;margin:6px 0 10px;line-height:1.4;}
+.stops-upload-row{margin-bottom:8px;}
+.btn-upload{
+  width:100%; display:flex; align-items:center; justify-content:center; gap:7px;
+}
+.btn-upload:disabled{opacity:0.6; cursor:default;}
 #stopsInput{
   width:100%; background:var(--surface-2); border:1px solid var(--border); border-radius:10px;
   color:var(--ink); font-family:"Public Sans",sans-serif; font-size:13px; padding:10px; resize:vertical;

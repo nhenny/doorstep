@@ -342,6 +342,8 @@
   var stopsStatus = document.getElementById("stopsStatus");
   var stopsBuildBtn = document.getElementById("stopsBuildBtn");
   var stopsCancelBtn = document.getElementById("stopsCancelBtn");
+  var stopsUploadBtn = document.getElementById("stopsUploadBtn");
+  var stopsImageInput = document.getElementById("stopsImageInput");
   var activeStopsArea = null;
 
   function openStopsModal(area) {
@@ -351,7 +353,7 @@
     var existing = loadStopsForArea(area.id);
     stopsInput.value = existing ? existing.slice().sort(function (a, b) { return a.order - b.order; }).map(function (s) { return s.address; }).join("\n") : "";
     stopsStatus.hidden = true;
-    stopsBuildBtn.disabled = false;
+    setStopsBusy(false);
     stopsModal.classList.add("open");
     stopsBackdrop.classList.add("open");
     window.setTimeout(function () { stopsInput.focus(); }, 150);
@@ -373,12 +375,78 @@
     stopsStatus.classList.toggle("error", !!isError);
   }
 
+  function setStopsBusy(busy) {
+    stopsBuildBtn.disabled = busy;
+    stopsUploadBtn.disabled = busy;
+  }
+
   stopsBuildBtn.addEventListener("click", function () {
     if (!activeStopsArea) return;
     var lines = stopsInput.value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
     if (!lines.length) { setStopsStatus("Add at least one address.", true); return; }
     if (!window.__doorstepMap || !window.google) { setStopsStatus("The map isn't loaded yet — try again in a moment.", true); return; }
     buildRoute(activeStopsArea, lines);
+  });
+
+  // ---- Upload a screenshot of a list -> OCR -> fill the textarea ----
+  var TESSERACT_SRC = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+  var tesseractLoadPromise = null;
+
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve();
+    if (tesseractLoadPromise) return tesseractLoadPromise;
+    tesseractLoadPromise = new Promise(function (resolve, reject) {
+      var script = document.createElement("script");
+      script.src = TESSERACT_SRC;
+      script.onload = function () { resolve(); };
+      script.onerror = function () {
+        tesseractLoadPromise = null;
+        reject(new Error("Couldn't load the text-recognition library — check your internet connection."));
+      };
+      document.head.appendChild(script);
+    });
+    return tesseractLoadPromise;
+  }
+
+  function cleanOcrLines(text) {
+    return text
+      .split("\n")
+      .map(function (l) { return l.replace(/[|_~]+/g, " ").replace(/\s+/g, " ").trim(); })
+      .filter(function (l) {
+        // Keep lines that look address-like: has a digit and a real word in it.
+        return l.length >= 5 && /\d/.test(l) && /[A-Za-z]{2,}/.test(l);
+      });
+  }
+
+  stopsUploadBtn.addEventListener("click", function () {
+    stopsImageInput.click();
+  });
+
+  stopsImageInput.addEventListener("change", function () {
+    var file = stopsImageInput.files && stopsImageInput.files[0];
+    stopsImageInput.value = ""; // allow re-selecting the same file again later
+    if (!file) return;
+
+    setStopsBusy(true);
+    setStopsStatus("Reading the screenshot…");
+
+    loadTesseract()
+      .then(function () { return Tesseract.recognize(file, "eng"); })
+      .then(function (result) {
+        var text = result && result.data && result.data.text ? result.data.text : "";
+        var lines = cleanOcrLines(text);
+        if (!lines.length) {
+          setStopsStatus("Couldn't make out any addresses in that image — try a clearer screenshot, or paste the addresses instead.", true);
+          return;
+        }
+        var existing = stopsInput.value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+        stopsInput.value = existing.concat(lines).join("\n");
+        setStopsStatus("Pulled " + lines.length + " line" + (lines.length === 1 ? "" : "s") + " from the image — double-check them below, then build the route.");
+      })
+      .catch(function (err) {
+        setStopsStatus(err && err.message ? err.message : "Couldn't read that image.", true);
+      })
+      .then(function () { setStopsBusy(false); });
   });
 
   function geocodeAll(addresses, callback) {
@@ -433,17 +501,17 @@
   }
 
   function buildRoute(area, addresses) {
-    stopsBuildBtn.disabled = true;
+    setStopsBusy(true);
     setStopsStatus("Looking up " + addresses.length + " address" + (addresses.length === 1 ? "" : "es") + "…");
     geocodeAll(addresses, function (err, geocoded, failed) {
       if (err) {
-        stopsBuildBtn.disabled = false;
+        setStopsBusy(false);
         setStopsStatus(err, true);
         return;
       }
       setStopsStatus("Building the fastest walking route…");
       optimizeRoute(geocoded, function (err2, ordered) {
-        stopsBuildBtn.disabled = false;
+        setStopsBusy(false);
         if (err2) { setStopsStatus(err2, true); return; }
         var stops = ordered.map(function (o, i) {
           return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i };
@@ -457,6 +525,7 @@
         closeStopsModal();
         activateArea(area);
         refreshAreaMeta();
+        selectTab("map"); // make sure the built route is actually visible
         if (failed && failed.length) {
           showMapBanner("Route built, but couldn't find: " + failed.join(", "));
         }

@@ -668,6 +668,59 @@
     tryTier();
   }
 
+  // A government address locator, when one is configured for the area being
+  // canvassed, gives real rooftop-level address data instead of Google's
+  // best guess — exactly the fix that solved this same "address not found"
+  // problem on the Alliant utility-map project: pull from an authoritative
+  // address-point dataset before ever falling back to Google. This one is
+  // an Esri "GeocodeServer" (the format most county/state GIS departments
+  // publish); it's tried first and, if it comes back empty, Google is still
+  // there as the fallback. Leave CONFIG.LOCATOR_URL blank to skip this and
+  // go straight to Google.
+  function geocodeLocator(address, anchor, callback) {
+    var base = CONFIG.LOCATOR_URL;
+    if (!base) { callback(null); return; }
+    var url = base + "?" + [
+      "SingleLine=" + encodeURIComponent(address),
+      "location=" + encodeURIComponent(anchor.lng + "," + anchor.lat),
+      "distance=80000", // meters (~50mi) — biases scoring toward the user, doesn't exclude farther matches
+      "outSR=4326",
+      "maxLocations=5",
+      "f=json"
+    ].join("&");
+
+    var timedOut = false;
+    var timer = window.setTimeout(function () { timedOut = true; callback(null); }, 6000);
+
+    fetch(url).then(function (res) {
+      return res.json();
+    }).then(function (json) {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      var candidates = (json && json.candidates) || [];
+      var best = candidates
+        .filter(function (c) {
+          var addrType = c.attributes && c.attributes.Addr_type;
+          return c.score >= 80 && (addrType === "PointAddress" || addrType === "StreetAddress");
+        })
+        .sort(function (a, b) { return b.score - a.score; })[0];
+      callback(best ? { lat: best.location.y, lng: best.location.x } : null);
+    }).catch(function () {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      callback(null); // network hiccup, CORS, or the service is down — just fall through to Google
+    });
+  }
+
+  function geocodeOne(addr, anchor, callback) {
+    geocodeLocator(addr, anchor, function (locatorResult) {
+      if (locatorResult) { callback(locatorResult); return; }
+      geocodeNear(ensureRegion(addr), anchor, function (result) {
+        callback(result ? { lat: result.geometry.location.lat(), lng: result.geometry.location.lng() } : null);
+      });
+    });
+  }
+
   function geocodeAll(addresses, callback) {
     if (!geocoder) geocoder = new google.maps.Geocoder();
     getUserAnchor(function (anchor) {
@@ -681,9 +734,9 @@
           return;
         }
         var addr = addresses[i++];
-        geocodeNear(ensureRegion(addr), anchor, function (result) {
+        geocodeOne(addr, anchor, function (result) {
           if (result) {
-            results.push({ address: addr, lat: result.geometry.location.lat(), lng: result.geometry.location.lng() });
+            results.push({ address: addr, lat: result.lat, lng: result.lng });
           } else {
             failed.push(addr);
           }
@@ -762,10 +815,47 @@
   var stopPolyline = null;
   var stopInfoWindow = null;
 
-  function escapeHtml(text) {
-    return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  // Builds the pin popup as real DOM nodes (not an HTML string) so the
+  // address text never needs escaping and each status button gets its own
+  // click handler directly, no id lookups after the fact.
+  function buildStopPopup(stop, marker, area, stops, fallbackLabel) {
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "font:500 12px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#111;min-width:190px;max-width:230px;";
+
+    var title = document.createElement("div");
+    title.style.cssText = "font:700 13px/1.35 -apple-system,BlinkMacSystemFont,sans-serif;margin-bottom:8px;";
+    title.textContent = "#" + (stop.label || fallbackLabel || "") + " · " + stop.address;
+    wrap.appendChild(title);
+
+    var btnRow = document.createElement("div");
+    btnRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:6px;";
+
+    STATUS_CYCLE.forEach(function (statusKey) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = STATUS_LABEL[statusKey];
+      var isActive = stop.status === statusKey;
+      btn.style.cssText =
+        "font:600 11px/1.2 -apple-system,BlinkMacSystemFont,sans-serif;padding:6px 4px;border-radius:6px;cursor:pointer;" +
+        "border:1.5px solid " + (isActive ? STATUS_COLOR[statusKey] : "#d8dbe0") + ";" +
+        "background:" + (isActive ? STATUS_COLOR[statusKey] : "#fff") + ";" +
+        "color:" + (isActive ? "#fff" : "#333") + ";";
+      btn.addEventListener("click", function () {
+        stop.status = statusKey;
+        marker.setIcon(stopIcon(stop.status));
+        saveStopsForArea(area.id, stops);
+        if (currentAreaId === area.id) {
+          var counts = getAreaCounts(area);
+          statValue.textContent = (counts.total - counts.done) + " of " + counts.total + " stops left";
+        }
+        refreshAreaMeta();
+        stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, fallbackLabel)); // re-render to show the new active state
+      });
+      btnRow.appendChild(btn);
     });
+
+    wrap.appendChild(btnRow);
+    return wrap;
   }
 
   function clearStopMarkers() {
@@ -809,24 +899,8 @@
         zIndex: 500
       });
       marker.addListener("click", function () {
-        var idx = STATUS_CYCLE.indexOf(stop.status);
-        stop.status = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
-        marker.setIcon(stopIcon(stop.status));
-        saveStopsForArea(area.id, stops);
-        if (currentAreaId === area.id) {
-          var counts = getAreaCounts(area);
-          statValue.textContent = (counts.total - counts.done) + " of " + counts.total + " stops left";
-        }
-        refreshAreaMeta();
-
         if (!stopInfoWindow) stopInfoWindow = new google.maps.InfoWindow();
-        stopInfoWindow.setContent(
-          '<div style="font:600 13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#111;max-width:220px;">' +
-          "#" + escapeHtml(stop.label || String(i + 1)) + " &middot; " + escapeHtml(stop.address) +
-          '<div style="margin-top:4px;font:500 12px/1.3 -apple-system,BlinkMacSystemFont,sans-serif;color:#666;">' +
-          escapeHtml(STATUS_LABEL[stop.status] || "Not yet visited") +
-          "</div></div>"
-        );
+        stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, String(i + 1)));
         stopInfoWindow.open({ map: window.__doorstepMap, anchor: marker });
       });
       stopMarkers.push(marker);
@@ -1046,6 +1120,13 @@
       var map = new google.maps.Map(document.getElementById("map"), mapOptions);
 
       window.__doorstepMap = map;
+
+      // Clicking a marker never reaches this listener (Google stops that
+      // propagation itself), so this only fires for clicks on open map
+      // area — exactly when the stop popup should close.
+      map.addListener("click", function () {
+        if (stopInfoWindow) stopInfoWindow.close();
+      });
 
       mapFallback.hidden = true;
       mapBanner.hidden = true;

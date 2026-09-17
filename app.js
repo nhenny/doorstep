@@ -421,7 +421,7 @@
     if (!query || !geocoder || !window.__doorstepMap) return;
     geocoder.geocode({ address: query }, function (results, status) {
       if (status !== "OK" || !results || !results[0]) {
-        showMapBanner('Couldn’t find "' + query + '" — try a more specific address or city.');
+        showMapBanner('Couldn’t find "' + query + '" — try a more specific address or city.', 6000);
         return;
       }
       var result = results[0];
@@ -648,7 +648,8 @@
           lng: g.lng,
           status: "upcoming",
           order: i,
-          label: (match && match.label) || String(i + 1)
+          label: (match && match.label) || String(i + 1),
+          approx: !!g.approx
         };
       });
       saveStopsForArea(area.id, stops);
@@ -662,6 +663,8 @@
       refreshAreaMeta();
       selectTab("map");
       var msg = "Added " + stops.length + " pin" + (stops.length === 1 ? "" : "s") + " to the map, numbered to match your screenshot" + (isMultiple ? "s" : "") + ".";
+      var approxCount = stops.filter(function (s) { return s.approx; }).length;
+      if (approxCount) msg += " " + approxCount + " " + (approxCount === 1 ? "is an estimate" : "are estimates") + " (faded pin) — tap one for details.";
       if (unreadableCount) msg += " Couldn't read " + unreadableCount + " of the images.";
       if (failed && failed.length) msg += " Couldn't find: " + failed.join(", ") + ".";
       setStopsStatus(msg);
@@ -738,6 +741,32 @@
     return false;
   }
 
+  // Even a "precise" (street_address/premise) result can still be a rough
+  // guess: Google's location_type tells you how it was actually derived.
+  // ROOFTOP means a real surveyed building location; RANGE_INTERPOLATED
+  // means Google estimated a point along the block between two known
+  // addresses — fine for a dense city block, but on a long rural road with
+  // few reference points it can land far from the real house, and two
+  // different house numbers can even interpolate to the identical point.
+  // Prefer a rooftop match whenever one's available; fall back to an
+  // interpolated one (flagged as approximate) rather than nothing.
+  function pickBestCandidate(candidates, anchor, radius) {
+    var best = null, bestDist = Infinity;
+    var bestRooftop = null, bestRooftopDist = Infinity;
+    candidates.forEach(function (r) {
+      if (!isPreciseMatch(r)) return; // skip city/county-level fallbacks
+      var loc = r.geometry.location;
+      var d = milesBetween(anchor, { lat: loc.lat(), lng: loc.lng() });
+      if (d < bestDist) { bestDist = d; best = r; }
+      if (r.geometry.location_type === "ROOFTOP" && d < bestRooftopDist) {
+        bestRooftopDist = d; bestRooftop = r;
+      }
+    });
+    if (bestRooftop && (!radius || bestRooftopDist <= radius * 1.5)) return bestRooftop;
+    if (best && (!radius || bestDist <= radius * 1.5)) return best;
+    return null;
+  }
+
   function geocodeNear(address, anchor, callback) {
     var i = 0;
     function tryTier() {
@@ -745,8 +774,8 @@
         // Widened all the way out and still nothing close — take whatever
         // Google's plain, unbiased answer is, as a last resort.
         geocoder.geocode({ address: address }, function (res, status) {
-          var match = status === "OK" && res ? res.filter(isPreciseMatch)[0] : null;
-          callback(match || null);
+          var candidates = status === "OK" && res ? res : [];
+          callback(pickBestCandidate(candidates, anchor, null));
         });
         return;
       }
@@ -756,14 +785,8 @@
           // "bounds" only biases Google's results, it doesn't restrict them,
           // so pick whichever precise candidate is actually nearest the user
           // before deciding this tier found a real match.
-          var best = null, bestDist = Infinity;
-          res.forEach(function (r) {
-            if (!isPreciseMatch(r)) return; // skip city/county-level fallbacks
-            var loc = r.geometry.location;
-            var d = milesBetween(anchor, { lat: loc.lat(), lng: loc.lng() });
-            if (d < bestDist) { bestDist = d; best = r; }
-          });
-          if (best && bestDist <= radius * 1.5) { callback(best); return; }
+          var chosen = pickBestCandidate(res, anchor, radius);
+          if (chosen) { callback(chosen); return; }
         }
         tryTier(); // nothing close enough (or precise enough) yet — widen out
       });
@@ -789,6 +812,13 @@
       "distance=80000", // meters (~50mi) — biases scoring toward the user, doesn't exclude farther matches
       "outSR=4326",
       "maxLocations=5",
+      // Esri's GeocodeServer returns an EMPTY attributes object unless the
+      // fields you want are named explicitly — without this, every
+      // candidate's Addr_type comes back undefined, the filter below always
+      // fails, and this locator silently never matches anything (every
+      // address falls through to Google even when this authoritative
+      // dataset actually has a precise result for it).
+      "outFields=Addr_type,Match_addr",
       "f=json"
     ].join("&");
 
@@ -807,7 +837,13 @@
           return c.score >= 80 && (addrType === "PointAddress" || addrType === "StreetAddress");
         })
         .sort(function (a, b) { return b.score - a.score; })[0];
-      callback(best ? { lat: best.location.y, lng: best.location.x } : null);
+      if (!best) { callback(null); return; }
+      // PointAddress is a real, surveyed rooftop location. StreetAddress is
+      // interpolated along the block — much better than Google's nationwide
+      // guess, but still an estimate, so it's flagged "approx" the same way
+      // a Google RANGE_INTERPOLATED match is below.
+      var addrType = best.attributes && best.attributes.Addr_type;
+      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress" });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -819,7 +855,12 @@
     geocodeLocator(addr, anchor, function (locatorResult) {
       if (locatorResult) { callback(locatorResult); return; }
       geocodeNear(ensureRegion(addr), anchor, function (result) {
-        callback(result ? { lat: result.geometry.location.lat(), lng: result.geometry.location.lng() } : null);
+        if (!result) { callback(null); return; }
+        callback({
+          lat: result.geometry.location.lat(),
+          lng: result.geometry.location.lng(),
+          approx: result.geometry.location_type !== "ROOFTOP"
+        });
       });
     });
   }
@@ -839,7 +880,7 @@
         var addr = addresses[i++];
         geocodeOne(addr, anchor, function (result) {
           if (result) {
-            results.push({ address: addr, lat: result.lat, lng: result.lng });
+            results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx });
           } else {
             failed.push(addr);
           }
@@ -891,7 +932,7 @@
         setStopsBusy(false);
         if (err2) { setStopsStatus(err2, true); return; }
         var stops = ordered.map(function (o, i) {
-          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i, label: String(i + 1) };
+          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i, label: String(i + 1), approx: !!o.approx };
         });
         saveStopsForArea(area.id, stops);
         setStopsRouted(area.id, true);
@@ -904,9 +945,13 @@
         activateArea(area);
         refreshAreaMeta();
         selectTab("map"); // make sure the built route is actually visible
-        if (failed && failed.length) {
-          showMapBanner("Route built, but couldn't find: " + failed.join(", "));
+        var approxCount = stops.filter(function (s) { return s.approx; }).length;
+        var bannerMsg = "";
+        if (failed && failed.length) bannerMsg = "Route built, but couldn't find: " + failed.join(", ") + ".";
+        if (approxCount) {
+          bannerMsg += (bannerMsg ? " " : "Route built. ") + approxCount + " stop" + (approxCount === 1 ? " is an estimate" : "s are estimates") + " (faded pins) — tap one for details.";
         }
+        if (bannerMsg) showMapBanner(bannerMsg, 8000);
       });
     });
   }
@@ -930,6 +975,13 @@
     title.textContent = "#" + (stop.label || fallbackLabel || "") + " · " + stop.address;
     wrap.appendChild(title);
 
+    if (stop.approx) {
+      var note = document.createElement("div");
+      note.style.cssText = "font:600 11px/1.35 -apple-system,BlinkMacSystemFont,sans-serif;color:#a15c00;background:#fff3dc;border-radius:6px;padding:5px 7px;margin-bottom:8px;";
+      note.textContent = "Estimated location — this address couldn't be matched exactly, so the pin may be off by some distance.";
+      wrap.appendChild(note);
+    }
+
     var btnRow = document.createElement("div");
     btnRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:6px;";
 
@@ -945,7 +997,7 @@
         "color:" + (isActive ? "#fff" : "#333") + ";";
       btn.addEventListener("click", function () {
         stop.status = statusKey;
-        marker.setIcon(stopIcon(stop.status));
+        marker.setIcon(stopIcon(stop.status, stop.approx));
         saveStopsForArea(area.id, stops);
         if (currentAreaId === area.id) {
           var counts = getAreaCounts(area);
@@ -975,14 +1027,19 @@
     if (stops && stops.length) renderStopsOnMap(area, stops);
   }
 
-  function stopIcon(status) {
+  // "approx" pins came from an interpolated guess (a range estimate along a
+  // road, not a real surveyed location) rather than a rooftop-precise
+  // match — faded out and given a dashed outline so it visually reads as
+  // "roughly here" rather than "exactly here".
+  function stopIcon(status, approx) {
     return {
       path: google.maps.SymbolPath.CIRCLE,
       scale: 12,
       fillColor: STATUS_COLOR[status] || STATUS_COLOR.upcoming,
-      fillOpacity: 1,
+      fillOpacity: approx ? 0.55 : 1,
       strokeColor: "#ffffff",
-      strokeWeight: 2
+      strokeWeight: 2,
+      strokeOpacity: approx ? 0.6 : 1
     };
   }
 
@@ -997,8 +1054,8 @@
         position: pos,
         map: window.__doorstepMap,
         label: { text: stop.label || String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
-        icon: stopIcon(stop.status),
-        title: stop.address,
+        icon: stopIcon(stop.status, stop.approx),
+        title: stop.address + (stop.approx ? " (estimated location)" : ""),
         zIndex: 500
       });
       marker.addListener("click", function () {
@@ -1072,7 +1129,7 @@
   }
 
   function onPositionError() {
-    showMapBanner("Couldn't get your location — check location permissions.");
+    showMapBanner("Couldn't get your location — check location permissions.", 6000);
     stopTracking();
   }
 
@@ -1164,7 +1221,7 @@
 
   function startTracking() {
     if (!navigator.geolocation) {
-      showMapBanner("Location isn't available in this browser.");
+      showMapBanner("Location isn't available in this browser.", 6000);
       return;
     }
     tracking = true;
@@ -1232,7 +1289,7 @@
       });
 
       mapFallback.hidden = true;
-      mapBanner.hidden = true;
+      hideMapBanner();
 
       setupSearch();
 
@@ -1245,9 +1302,28 @@
     }
   };
 
-  function showMapBanner(text) {
+  // A one-off result (a search miss, a route that couldn't find every
+  // address) should clear itself after a few seconds instead of sitting on
+  // screen forever — pass autoHideMs for those. A banner describing an
+  // ongoing state (no API key configured, the map failed to load) is left
+  // to sit until something actually changes that state, so leave
+  // autoHideMs off for those.
+  var mapBannerHideTimer = null;
+  function showMapBanner(text, autoHideMs) {
     mapBannerText.textContent = text;
     mapBanner.hidden = false;
+    if (mapBannerHideTimer) { window.clearTimeout(mapBannerHideTimer); mapBannerHideTimer = null; }
+    if (autoHideMs) {
+      mapBannerHideTimer = window.setTimeout(function () {
+        mapBanner.hidden = true;
+        mapBannerHideTimer = null;
+      }, autoHideMs);
+    }
+  }
+
+  function hideMapBanner() {
+    if (mapBannerHideTimer) { window.clearTimeout(mapBannerHideTimer); mapBannerHideTimer = null; }
+    mapBanner.hidden = true;
   }
 
   function loadGoogleMaps() {

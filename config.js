@@ -28,14 +28,21 @@ window.DOORSTEP_CONFIG = {
 
   // Optional. A public government address locator (an Esri "GeocodeServer")
   // for the area being canvassed. When set, every address is looked up here
-  // FIRST — real, rooftop-level address-point data — before ever falling
-  // back to Google's geocoder. This is the same fix used on the Alliant
-  // utility-map project: authoritative local address data beats a general
-  // geocoder for addresses Google's index doesn't have.
-  // Currently set to Harris County's public locator (covers Houston/Harris
-  // County, TX; no API key needed). Leave blank to skip this and use Google
-  // only — or swap in another county/state GIS department's GeocodeServer
-  // URL if you start canvassing somewhere else.
+  // FIRST — real, rooftop- or address-range-level address-point data —
+  // before ever falling back to Google's geocoder. This is the same fix
+  // used on the Alliant utility-map project: authoritative local address
+  // data beats a general geocoder for addresses Google's index doesn't have.
+  // Currently set to the Houston-Galveston Area Council's regional "StarMap"
+  // locator — despite the URL living under Harris County's GIS server, its
+  // own data (Loc_name "HGAC_StarMap_R") actually covers the whole 13-county
+  // Houston-Galveston metro (Harris, Montgomery, Fort Bend, Brazoria,
+  // Galveston, Liberty, Chambers, Waller, Austin, Colorado, Matagorda,
+  // Walker, and Wharton counties), no API key needed. Still, some very rural
+  // or unincorporated roads aren't in even this dataset and fall through to
+  // Google — if you're regularly missing addresses in one particular county,
+  // that county's own GIS department may publish a more complete
+  // GeocodeServer worth adding ahead of (or instead of) this one. Leave
+  // blank to skip this and use Google only.
   LOCATOR_URL: "https://www.gis.hctx.net/arcgis/rest/services/Locator/Harris_Co_GCS_Composite/GeocodeServer/findAddressCandidates",
 
   // Optional. A Google Maps "Map ID" (Cloud Console -> Maps Management ->

@@ -496,36 +496,52 @@
   });
 
   stopsImageInput.addEventListener("change", function () {
-    var file = stopsImageInput.files && stopsImageInput.files[0];
-    stopsImageInput.value = ""; // allow re-selecting the same file again later
-    if (!file || !activeStopsArea) return;
+    var files = stopsImageInput.files ? Array.prototype.slice.call(stopsImageInput.files) : [];
+    stopsImageInput.value = ""; // allow re-selecting the same file(s) again later
+    if (!files.length || !activeStopsArea) return;
 
     setStopsBusy(true);
-    setStopsStatus("Reading the screenshot…");
+    setStopsStatus(files.length === 1 ? "Reading the screenshot…" : "Reading screenshot 1 of " + files.length + "…");
 
-    loadTesseract()
-      .then(function () { return Tesseract.recognize(file, "eng"); })
-      .then(function (result) {
-        var lines = (result && result.data && result.data.lines) || [];
-        var pairs = extractAddressNumberPairs(lines);
-        if (!pairs.length) {
+    var allPairs = [];
+    var unreadable = 0;
+
+    function readNext(i) {
+      if (i >= files.length) {
+        if (!allPairs.length) {
           setStopsBusy(false);
-          setStopsStatus("Couldn't make out any addresses in that image — try a clearer screenshot, or paste the addresses instead.", true);
+          setStopsStatus("Couldn't make out any addresses in " + (files.length === 1 ? "that image" : "those images") + " — try clearer screenshots, or paste the addresses instead.", true);
           return;
         }
-        stopsInput.value = pairs.map(function (p) { return p.address; }).join("\n");
-        buildPinsFromImage(activeStopsArea, pairs);
-      })
+        stopsInput.value = allPairs.map(function (p) { return p.address; }).join("\n");
+        buildPinsFromImage(activeStopsArea, allPairs, unreadable, files.length > 1);
+        return;
+      }
+      if (files.length > 1) setStopsStatus("Reading screenshot " + (i + 1) + " of " + files.length + "…");
+      Tesseract.recognize(files[i], "eng")
+        .then(function (result) {
+          var lines = (result && result.data && result.data.lines) || [];
+          allPairs = allPairs.concat(extractAddressNumberPairs(lines));
+          readNext(i + 1);
+        })
+        .catch(function () {
+          unreadable++;
+          readNext(i + 1);
+        });
+    }
+
+    loadTesseract()
+      .then(function () { readNext(0); })
       .catch(function (err) {
         setStopsBusy(false);
-        setStopsStatus(err && err.message ? err.message : "Couldn't read that image.", true);
+        setStopsStatus(err && err.message ? err.message : "Couldn't load the OCR engine.", true);
       });
   });
 
   // Places numbered pins straight on the map — no route optimization, just
   // matching the numbers from the screenshot. "Build route" (above) stays
   // available afterward for anyone who also wants an optimized order.
-  function buildPinsFromImage(area, pairs) {
+  function buildPinsFromImage(area, pairs, unreadableCount, isMultiple) {
     setStopsStatus("Looking up " + pairs.length + " address" + (pairs.length === 1 ? "" : "es") + "…");
     var addresses = pairs.map(function (p) { return p.address; });
     geocodeAll(addresses, function (err, geocoded, failed) {
@@ -552,7 +568,8 @@
       activateArea(area);
       refreshAreaMeta();
       selectTab("map");
-      var msg = "Added " + stops.length + " pin" + (stops.length === 1 ? "" : "s") + " to the map, numbered to match your screenshot.";
+      var msg = "Added " + stops.length + " pin" + (stops.length === 1 ? "" : "s") + " to the map, numbered to match your screenshot" + (isMultiple ? "s" : "") + ".";
+      if (unreadableCount) msg += " Couldn't read " + unreadableCount + " of the images.";
       if (failed && failed.length) msg += " Couldn't find: " + failed.join(", ") + ".";
       setStopsStatus(msg);
     });
@@ -560,36 +577,104 @@
 
   // Rural and unincorporated addresses (e.g. "4951 County Road 152") often
   // have no city/state for Google to disambiguate against — fall back to a
-  // configured default region so those still geocode.
+  // configured default region so those still geocode. Only look for an
+  // existing state/ZIP after the LAST comma — checking the whole string
+  // would mistake a plain 5-digit house number ("12555 County Road 153")
+  // for a ZIP code and skip adding the region entirely.
   var STATE_ABBR_RE = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
   function ensureRegion(address) {
-    if (STATE_ABBR_RE.test(address) || /\b\d{5}(-\d{4})?\b/.test(address)) return address;
+    var trimmed = (address || "").trim();
+    var commaIdx = trimmed.lastIndexOf(",");
+    var tail = commaIdx !== -1 ? trimmed.slice(commaIdx) : "";
+    if (tail && (STATE_ABBR_RE.test(tail) || /\b\d{5}(-\d{4})?\b/.test(tail))) return trimmed;
     var region = (CONFIG.DEFAULT_REGION || "").trim();
-    return region ? (address + ", " + region) : address;
+    return region ? (trimmed + ", " + region) : trimmed;
+  }
+
+  // ---- Distance + expanding-radius search, centered on the user ----
+  // Addresses like "County Road 152" exist in dozens of states, so a plain
+  // geocode call can come back with a match on the other side of the
+  // country. Instead we search in rings out from the user's location —
+  // tight at first, widening only if nothing turns up nearby — and among
+  // whatever candidates Google returns, keep the one actually closest to
+  // the user rather than assuming the first result is right.
+  var SEARCH_RADII_MILES = [15, 50, 200, 800];
+
+  function milesBetween(a, b) {
+    var R = 3958.8; // Earth radius in miles
+    var dLat = (b.lat - a.lat) * Math.PI / 180;
+    var dLng = (b.lng - a.lng) * Math.PI / 180;
+    var lat1 = a.lat * Math.PI / 180;
+    var lat2 = b.lat * Math.PI / 180;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function boundsAround(center, miles) {
+    var latDelta = miles / 69; // ~69 miles per degree of latitude
+    var lngDelta = miles / (69 * Math.max(0.15, Math.cos(center.lat * Math.PI / 180)));
+    return new google.maps.LatLngBounds(
+      { lat: center.lat - latDelta, lng: center.lng - lngDelta },
+      { lat: center.lat + latDelta, lng: center.lng + lngDelta }
+    );
+  }
+
+  function geocodeNear(address, anchor, callback) {
+    var i = 0;
+    function tryTier() {
+      if (i >= SEARCH_RADII_MILES.length) {
+        // Widened all the way out and still nothing close — take whatever
+        // Google's plain, unbiased answer is, as a last resort.
+        geocoder.geocode({ address: address }, function (res, status) {
+          callback(status === "OK" && res && res[0] ? res[0] : null);
+        });
+        return;
+      }
+      var radius = SEARCH_RADII_MILES[i++];
+      geocoder.geocode({ address: address, bounds: boundsAround(anchor, radius) }, function (res, status) {
+        if (status === "OK" && res && res.length) {
+          // "bounds" only biases Google's results, it doesn't restrict them,
+          // so pick whichever candidate is actually nearest the user before
+          // deciding this tier found a real match.
+          var best = null, bestDist = Infinity;
+          res.forEach(function (r) {
+            var loc = r.geometry.location;
+            var d = milesBetween(anchor, { lat: loc.lat(), lng: loc.lng() });
+            if (d < bestDist) { bestDist = d; best = r; }
+          });
+          if (best && bestDist <= radius * 1.5) { callback(best); return; }
+        }
+        tryTier(); // nothing close enough yet — widen the search outward
+      });
+    }
+    tryTier();
   }
 
   function geocodeAll(addresses, callback) {
     if (!geocoder) geocoder = new google.maps.Geocoder();
-    var results = [];
-    var failed = [];
-    var i = 0;
-    function next() {
-      if (i >= addresses.length) {
-        if (!results.length) { callback("Couldn't find any of those addresses. Try including city and state."); return; }
-        callback(null, results, failed);
-        return;
-      }
-      var addr = addresses[i++];
-      geocoder.geocode({ address: ensureRegion(addr) }, function (res, status) {
-        if (status === "OK" && res && res[0]) {
-          results.push({ address: addr, lat: res[0].geometry.location.lat(), lng: res[0].geometry.location.lng() });
-        } else {
-          failed.push(addr);
+    getUserAnchor(function (anchor) {
+      var results = [];
+      var failed = [];
+      var i = 0;
+      function next() {
+        if (i >= addresses.length) {
+          if (!results.length) { callback("Couldn't find any of those addresses. Try including city and state."); return; }
+          callback(null, results, failed);
+          return;
         }
-        window.setTimeout(next, 180); // stay well under Geocoding's per-second rate limit
-      });
-    }
-    next();
+        var addr = addresses[i++];
+        geocodeNear(ensureRegion(addr), anchor, function (result) {
+          if (result) {
+            results.push({ address: addr, lat: result.geometry.location.lat(), lng: result.geometry.location.lng() });
+          } else {
+            failed.push(addr);
+          }
+          window.setTimeout(next, 180); // stay well under Geocoding's per-second rate limit
+        });
+      }
+      next();
+    });
   }
 
   function optimizeRoute(points, callback) {
@@ -655,13 +740,22 @@
 
   // ---- Stop markers + route line on the map ----
   var STATUS_CYCLE = ["upcoming", "done", "notyet", "refused"];
+  var STATUS_LABEL = { upcoming: "Not yet visited", done: "Completed", notyet: "Not home", refused: "Refused" };
   var stopMarkers = [];
   var stopPolyline = null;
+  var stopInfoWindow = null;
+
+  function escapeHtml(text) {
+    return String(text == null ? "" : text).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
 
   function clearStopMarkers() {
     stopMarkers.forEach(function (m) { m.setMap(null); });
     stopMarkers = [];
     if (stopPolyline) { stopPolyline.setMap(null); stopPolyline = null; }
+    if (stopInfoWindow) stopInfoWindow.close();
   }
 
   function showStopsForArea(area) {
@@ -707,6 +801,16 @@
           statValue.textContent = (counts.total - counts.done) + " of " + counts.total + " stops left";
         }
         refreshAreaMeta();
+
+        if (!stopInfoWindow) stopInfoWindow = new google.maps.InfoWindow();
+        stopInfoWindow.setContent(
+          '<div style="font:600 13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#111;max-width:220px;">' +
+          "#" + escapeHtml(stop.label || String(i + 1)) + " &middot; " + escapeHtml(stop.address) +
+          '<div style="margin-top:4px;font:500 12px/1.3 -apple-system,BlinkMacSystemFont,sans-serif;color:#666;">' +
+          escapeHtml(STATUS_LABEL[stop.status] || "Not yet visited") +
+          "</div></div>"
+        );
+        stopInfoWindow.open({ map: window.__doorstepMap, anchor: marker });
       });
       stopMarkers.push(marker);
     });
@@ -762,8 +866,11 @@
     youMarker.setIcon(icon);
   }
 
+  var lastKnownPosition = null;
+
   function onPosition(pos) {
     var latLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    lastKnownPosition = latLng;
     ensureYouMarker(latLng);
     if (window.__doorstepMap) {
       window.__doorstepMap.panTo(latLng);
@@ -773,6 +880,38 @@
   function onPositionError() {
     showMapBanner("Couldn't get your location — check location permissions.");
     stopTracking();
+  }
+
+  // Best-known location to search outward from when geocoding addresses.
+  // Reuses live tracking's last fix if it's already running; otherwise asks
+  // for a single quick position (falling back to the app's default map
+  // center if location isn't available or permission is denied).
+  function getUserAnchor(callback) {
+    if (lastKnownPosition) { callback(lastKnownPosition); return; }
+    var fallback = (CONFIG && CONFIG.MAP_CENTER) || { lat: 42.5006, lng: -90.6648 };
+    if (!navigator.geolocation) { callback(fallback); return; }
+    var settled = false;
+    var timer = window.setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      callback(fallback);
+    }, 4000);
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        lastKnownPosition = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        callback(lastKnownPosition);
+      },
+      function () {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        callback(fallback);
+      },
+      { maximumAge: 5 * 60 * 1000, timeout: 4000 }
+    );
   }
 
   function onOrientation(event) {

@@ -853,7 +853,7 @@
       // guess, but still an estimate, so it's flagged "approx" the same way
       // a Google RANGE_INTERPOLATED match is below.
       var addrType = best.attributes && best.attributes.Addr_type;
-      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress", score: best.score });
+      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress", score: best.score, trusted: true });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -891,6 +891,12 @@
       .replace(/\bBOULEVARD\b/g, "BLVD")
       .replace(/\bCOURT\b/g, "CT")
       .replace(/\bCIRCLE\b/g, "CIR")
+      .replace(/\bSTATE\s+HIGHWAY\b/g, "HWY")
+      .replace(/\bSTATE\s+HWY\b/g, "HWY")
+      .replace(/\bUS\s+HIGHWAY\b/g, "HWY")
+      .replace(/\bHIGHWAY\b/g, "HWY")
+      .replace(/\bSH\b/g, "HWY") // TxDOT shorthand: "SH 90" = "State Highway 90"
+      .replace(/\bUS\b/g, "HWY")
       // Some county datasets store the abbreviation with no space at all
       // ("CR152" rather than "CR 152") — split those apart too, so the
       // number still ends up as its own token instead of being fused onto
@@ -914,13 +920,23 @@
   // matching over "probably close enough" — a wrong number here sends
   // someone to a different road entirely, which is worse than not finding
   // the address at all.
+  // Bare compass-direction tokens ("N", "S", "E", "W", and the two-letter
+  // combinations) are dropped when deciding whether two street names are
+  // "the same road" — real-world example: a canvasser's own list had
+  // "Highway 90 N", but the county's own record for that exact house is
+  // just "HWY90", no direction at all. Even Google/Apple Maps' own search
+  // silently drops a trailing "N" like this rather than treat it as
+  // required. Requiring it to match was rejecting a real, correct county
+  // record and sending the address to Google's nationwide guesser instead
+  // — which is how it ended up in a different city entirely.
+  var DIRECTION_TOKENS = { N: 1, S: 1, E: 1, W: 1, NE: 1, NW: 1, SE: 1, SW: 1 };
   function streetTokensMatch(queryTokens, candidateTokens) {
     var queryNums = queryTokens.filter(function (t) { return /^\d+$/.test(t); });
     if (queryNums.length) {
       var allNumsMatch = queryNums.every(function (n) { return candidateTokens.indexOf(n) !== -1; });
       if (!allNumsMatch) return false;
     }
-    var queryWords = queryTokens.filter(function (t) { return !/^\d+$/.test(t); });
+    var queryWords = queryTokens.filter(function (t) { return !/^\d+$/.test(t) && !DIRECTION_TOKENS[t]; });
     if (!queryWords.length) return queryNums.length > 0;
     return queryWords.some(function (w) { return candidateTokens.indexOf(w) !== -1; });
   }
@@ -977,7 +993,7 @@
       if (!best) { callback(null); return; }
       // This is the county's own ground-truth 911 addressing data — a
       // strictly matched point is exact, not an estimate.
-      callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100 });
+      callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100, trusted: true });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -1031,7 +1047,7 @@
       if (!feats.length) { callback(null); return; }
       var best = bestStreetMatch(feats, parsed, function (f) { return f.attributes.situs_street; });
       if (!best || !best.centroid) { callback(null); return; }
-      callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60 });
+      callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60, trusted: true });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -1078,7 +1094,15 @@
         callback({
           lat: result.geometry.location.lat(),
           lng: result.geometry.location.lng(),
-          approx: result.geometry.location_type !== "ROOFTOP"
+          approx: result.geometry.location_type !== "ROOFTOP",
+          // Google's plain nationwide geocoder, with no authoritative local
+          // dataset behind it — it picks the nearest-to-anchor candidate
+          // among however many places share that address text, which is
+          // exactly the failure mode that put "20720 Highway 90" in the
+          // wrong county: a real ROOFTOP match, just for the wrong one.
+          // Never trusted enough to anchor the rest of a batch's search —
+          // see geocodeAll.
+          trusted: false
         });
       });
     });
@@ -1102,7 +1126,7 @@
       var addr = addresses[i++];
       geocodeOne(addr, anchor, function (result) {
         if (result) {
-          results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx });
+          results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx, trusted: !!result.trusted });
         } else {
           failed.push(addr);
         }
@@ -1128,11 +1152,21 @@
         // from the anchor instead of the real one 90 miles away in a
         // different county, because the nearer wrong guess turned up
         // first. Once enough of THIS list's own addresses land a
-        // confident (non-estimated) match, their center is a far better
-        // anchor than the original guess — so anything that came back
-        // approximate or unfound gets one more try centered there instead.
-        var confident = results.filter(function (r) { return !r.approx; });
-        var needsRetry = results.filter(function (r) { return r.approx; });
+        // TRUSTED match — one of the configured government/county
+        // datasets, not Google's plain nationwide guess — their center is
+        // a far better anchor than the original guess. "Trusted" is
+        // deliberately not the same thing as "not flagged approximate":
+        // a parcel-centroid match from a rural county dataset is flagged
+        // approximate (it's the middle of the lot, not the house) but is
+        // still real, verified data for the right property — exactly the
+        // kind of result that should anchor the rest of a rural list.
+        // Google's own guesses never anchor anything, precise-looking or
+        // not, since a wrong-city match can just as easily come back
+        // ROOFTOP-flagged as approximate. Only Google-sourced (untrusted)
+        // results get retried — a trusted match is already as good as
+        // this app can independently verify.
+        var confident = results.filter(function (r) { return r.trusted; });
+        var needsRetry = results.filter(function (r) { return !r.trusted; });
         if (confident.length < 2 || (!needsRetry.length && !failed.length)) {
           finish(results, failed);
           return;

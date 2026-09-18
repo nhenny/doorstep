@@ -832,15 +832,21 @@
       if (timedOut) return;
       window.clearTimeout(timer);
       var candidates = (json && json.candidates) || [];
-      var best = candidates
-        .filter(function (c) {
-          var addrType = c.attributes && c.attributes.Addr_type;
-          // A regional dataset can occasionally match the right house
-          // number on a similarly-named road in the wrong county — a high
-          // score floor is what keeps that from being accepted.
-          return c.score >= 80 && (addrType === "PointAddress" || addrType === "StreetAddress");
-        })
-        .sort(function (a, b) { return b.score - a.score; })[0];
+      var usable = candidates.filter(function (c) {
+        var addrType = c.attributes && c.attributes.Addr_type;
+        // A regional dataset can occasionally match the right house
+        // number on a similarly-named road in the wrong county — a high
+        // score floor is what keeps that from being accepted.
+        return c.score >= 80 && (addrType === "PointAddress" || addrType === "StreetAddress");
+      });
+      // A real, surveyed PointAddress always wins over an interpolated
+      // StreetAddress guess, even one that happened to score a little
+      // higher — the category gap matters more than a few score points,
+      // and picking by raw score alone was letting a rougher interpolated
+      // match beat a precise one that was sitting right there.
+      var pointMatches = usable.filter(function (c) { return c.attributes.Addr_type === "PointAddress"; });
+      var pool = pointMatches.length ? pointMatches : usable;
+      var best = pool.sort(function (a, b) { return b.score - a.score; })[0];
       if (!best) { callback(null); return; }
       // PointAddress is a real, surveyed rooftop location. StreetAddress is
       // interpolated along the block — much better than Google's nationwide
@@ -865,18 +871,85 @@
     return { num: parseInt(m[1], 10), streetRaw: m[2].trim().toUpperCase() };
   }
 
+  // Turns a street name into comparable tokens, collapsing the common
+  // longhand/abbreviation spellings of rural road types onto one spelling
+  // ("COUNTY ROAD" and "CO RD" and "COUNTY RD" all become "CR") so
+  // "County Road 152" and "CR 152" are recognized as the same road.
+  function normalizeStreetTokens(street) {
+    return (street || "")
+      .toUpperCase()
+      .replace(/\bCOUNTY\s+ROAD\b/g, "CR")
+      .replace(/\bCO\s+RD\b/g, "CR")
+      .replace(/\bCOUNTY\s+RD\b/g, "CR")
+      .replace(/\bFARM[\s-]TO[\s-]MARKET\s+ROAD\b/g, "FM")
+      .replace(/\bFM\s+ROAD\b/g, "FM")
+      .replace(/\bSTREET\b/g, "ST")
+      .replace(/\bAVENUE\b/g, "AVE")
+      .replace(/\bDRIVE\b/g, "DR")
+      .replace(/\bLANE\b/g, "LN")
+      .replace(/\bROAD\b/g, "RD")
+      .replace(/\bBOULEVARD\b/g, "BLVD")
+      .replace(/\bCOURT\b/g, "CT")
+      .replace(/\bCIRCLE\b/g, "CIR")
+      // Some county datasets store the abbreviation with no space at all
+      // ("CR152" rather than "CR 152") — split those apart too, so the
+      // number still ends up as its own token instead of being fused onto
+      // the letters and never matching.
+      .replace(/([A-Z])(\d)/g, "$1 $2")
+      .replace(/(\d)([A-Z])/g, "$1 $2")
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  // A loose substring check on a bare road number is dangerous: searching
+  // for "152" with String.indexOf() also matches "1520", "1523", "2152" —
+  // entirely different roads that happen to contain the same digits. This
+  // only accepts a candidate when every NUMBER in the address being looked
+  // up (the "152" in "County Road 152") appears as its own exact token in
+  // the candidate's street name, not merely somewhere inside a longer
+  // number, plus at least one of the non-number words lines up too (so a
+  // bare number match can't pass on its own). Real, driveable-precision
+  // matching over "probably close enough" — a wrong number here sends
+  // someone to a different road entirely, which is worse than not finding
+  // the address at all.
+  function streetTokensMatch(queryTokens, candidateTokens) {
+    var queryNums = queryTokens.filter(function (t) { return /^\d+$/.test(t); });
+    if (queryNums.length) {
+      var allNumsMatch = queryNums.every(function (n) { return candidateTokens.indexOf(n) !== -1; });
+      if (!allNumsMatch) return false;
+    }
+    var queryWords = queryTokens.filter(function (t) { return !/^\d+$/.test(t); });
+    if (!queryWords.length) return queryNums.length > 0;
+    return queryWords.some(function (w) { return candidateTokens.indexOf(w) !== -1; });
+  }
+
+  // Ranks raw feature candidates against the parsed address, returning the
+  // best strict token match (see streetTokensMatch) or null if nothing
+  // passes — silence beats a confident wrong answer here.
+  function bestStreetMatch(feats, parsed, streetFieldGetter) {
+    var queryTokens = normalizeStreetTokens(parsed.streetRaw);
+    var best = null, bestScore = -1;
+    feats.forEach(function (f) {
+      var candidateTokens = normalizeStreetTokens(streetFieldGetter(f));
+      if (!streetTokensMatch(queryTokens, candidateTokens)) return;
+      // Among valid matches, prefer the one sharing the most tokens overall
+      // (handles a few real duplicate-numbered-road edge cases cleanly).
+      var score = queryTokens.filter(function (t) { return candidateTokens.indexOf(t) !== -1; }).length;
+      if (score > bestScore) { bestScore = score; best = f; }
+    });
+    return best;
+  }
+
   // Montgomery County's own E-911 address-point layer isn't a geocoder —
   // it's a raw, queryable table of real addresses (house number + street +
   // exact lat/lng), so instead of a fuzzy text search we query it directly:
   // exact house number, then a loose LIKE on the street so it still matches
-  // whether the county spells it "County Rd" or "CR" or "County Road". The
-  // street-name abbreviation can vary, but a road's own number rarely does,
-  // so when the street name contains a number (e.g. "COUNTY ROAD 152") that
-  // number is the search hint; otherwise the first word of the name is
-  // ("MEMORY LN" -> "MEMORY"). Whatever candidates come back are then
-  // ranked client-side by how many words they actually share with the
-  // address typed in, since the loose LIKE alone can pull in more than one
-  // road with the same house number.
+  // whether the county spells it "County Rd" or "CR" or "County Road" (the
+  // LIKE only narrows what comes back from the server — see
+  // bestStreetMatch for the strict client-side check that actually decides
+  // whether a candidate is trusted).
   function geocodeCountyPoints(base, address, callback) {
     var parsed = parseHouseAndStreet(address);
     if (!parsed) { callback(null); return; }
@@ -900,16 +973,10 @@
       window.clearTimeout(timer);
       var feats = (json && json.features) || [];
       if (!feats.length) { callback(null); return; }
-      var streetWords = parsed.streetRaw.split(/\s+/).filter(Boolean);
-      var best = null, bestOverlap = 0;
-      feats.forEach(function (f) {
-        var street = (f.attributes.STREET || "").toUpperCase();
-        var overlap = streetWords.filter(function (w) { return street.indexOf(w) !== -1; }).length;
-        if (overlap > bestOverlap) { bestOverlap = overlap; best = f; }
-      });
+      var best = bestStreetMatch(feats, parsed, function (f) { return f.attributes.STREET; });
       if (!best) { callback(null); return; }
       // This is the county's own ground-truth 911 addressing data — a
-      // matched point is exact, not an estimate.
+      // strictly matched point is exact, not an estimate.
       callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100 });
     }).catch(function () {
       if (timedOut) return;
@@ -962,13 +1029,7 @@
       window.clearTimeout(timer);
       var feats = (json && json.features) || [];
       if (!feats.length) { callback(null); return; }
-      var streetWords = parsed.streetRaw.split(/\s+/).filter(Boolean);
-      var best = null, bestOverlap = 0;
-      feats.forEach(function (f) {
-        var street = (f.attributes.situs_street || "").toUpperCase();
-        var overlap = streetWords.filter(function (w) { return street.indexOf(w) !== -1; }).length;
-        if (overlap > bestOverlap) { bestOverlap = overlap; best = f; }
-      });
+      var best = bestStreetMatch(feats, parsed, function (f) { return f.attributes.situs_street; });
       if (!best || !best.centroid) { callback(null); return; }
       callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60 });
     }).catch(function () {

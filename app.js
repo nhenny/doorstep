@@ -640,25 +640,16 @@
     geocodeAll(addresses, function (err, geocoded, failed) {
       setStopsBusy(false);
       if (err) { setStopsStatus(err, true); return; }
-      // Preserve any pin that was already dragged into place by hand for
-      // this area (see renderStopsOnMap) — a manual correction is ground
-      // truth and shouldn't get silently overwritten by a fresh geocode.
-      var manualByAddr = {};
-      (loadStopsForArea(area.id) || []).forEach(function (s) {
-        if (s.manuallyPlaced) manualByAddr[s.address] = s;
-      });
       var stops = geocoded.map(function (g, i) {
         var match = pairs.filter(function (p) { return p.address === g.address; })[0];
-        var manual = manualByAddr[g.address];
         return {
           address: g.address,
-          lat: manual ? manual.lat : g.lat,
-          lng: manual ? manual.lng : g.lng,
+          lat: g.lat,
+          lng: g.lng,
           status: "upcoming",
           order: i,
           label: (match && match.label) || String(i + 1),
-          approx: manual ? false : !!g.approx,
-          manuallyPlaced: !!manual
+          approx: !!g.approx
         };
       });
       saveStopsForArea(area.id, stops);
@@ -1207,28 +1198,11 @@
         return;
       }
       setStopsStatus("Building the fastest walking route…");
-      // If a pin for one of these addresses was dragged into place by hand
-      // before (see renderStopsOnMap), that correction is real ground
-      // truth — don't let a fresh geocode silently overwrite it.
-      var manualByAddr = {};
-      (loadStopsForArea(area.id) || []).forEach(function (s) {
-        if (s.manuallyPlaced) manualByAddr[s.address] = s;
-      });
       optimizeRoute(geocoded, function (err2, ordered) {
         setStopsBusy(false);
         if (err2) { setStopsStatus(err2, true); return; }
         var stops = ordered.map(function (o, i) {
-          var manual = manualByAddr[o.address];
-          return {
-            address: o.address,
-            lat: manual ? manual.lat : o.lat,
-            lng: manual ? manual.lng : o.lng,
-            status: "upcoming",
-            order: i,
-            label: String(i + 1),
-            approx: manual ? false : !!o.approx,
-            manuallyPlaced: !!manual
-          };
+          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i, label: String(i + 1), approx: !!o.approx };
         });
         saveStopsForArea(area.id, stops);
         setStopsRouted(area.id, true);
@@ -1351,41 +1325,13 @@
         map: window.__doorstepMap,
         label: { text: stop.label || String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
         icon: stopIcon(stop.status, stop.approx),
-        title: stop.address + (stop.approx ? " (estimated location — drag to fix)" : " (drag to reposition)"),
-        zIndex: 500,
-        // No geocoder — ours or Google's or Apple's — can always place a pin
-        // exactly right, especially when the address itself is written
-        // ambiguously (e.g. a trailing "N" that might be a direction, might
-        // be noise). Rather than chase 100% automated accuracy, every pin
-        // can just be dragged onto the real spot by whoever's looking at
-        // the map or standing at the house — that correction is saved and
-        // treated as ground truth from then on.
-        draggable: true
+        title: stop.address + (stop.approx ? " (estimated location)" : ""),
+        zIndex: 500
       });
       marker.addListener("click", function () {
         if (!stopInfoWindow) stopInfoWindow = new google.maps.InfoWindow();
         stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, String(i + 1)));
         stopInfoWindow.open({ map: window.__doorstepMap, anchor: marker });
-      });
-      marker.addListener("dragend", function () {
-        var newPos = marker.getPosition();
-        stop.lat = newPos.lat();
-        stop.lng = newPos.lng();
-        // A human just placed this pin by hand — that beats any geocoder,
-        // so it's no longer flagged as an estimate, and it won't get
-        // overwritten by re-running "Build route" later (see buildRoute).
-        stop.approx = false;
-        stop.manuallyPlaced = true;
-        marker.setIcon(stopIcon(stop.status, stop.approx));
-        marker.setTitle(stop.address + " (drag to reposition)");
-        saveStopsForArea(area.id, stops);
-        if (stopPolyline) {
-          var pts = stops.map(function (s) { return { lat: s.lat, lng: s.lng }; });
-          stopPolyline.setPath(pts);
-        }
-        if (stopInfoWindow && stopInfoWindow.getMap()) {
-          stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, String(i + 1)));
-        }
       });
       stopMarkers.push(marker);
     });

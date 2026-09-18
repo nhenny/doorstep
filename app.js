@@ -853,7 +853,18 @@
       // guess, but still an estimate, so it's flagged "approx" the same way
       // a Google RANGE_INTERPOLATED match is below.
       var addrType = best.attributes && best.attributes.Addr_type;
-      callback({ lat: best.location.y, lng: best.location.x, approx: addrType !== "PointAddress", score: best.score, trusted: true });
+      callback({
+        lat: best.location.y, lng: best.location.x,
+        approx: addrType !== "PointAddress", score: best.score,
+        trusted: true,
+        // This locator's own coverage spans a huge 13-county region, so
+        // "trusted" doesn't mean "unambiguous": the same road name/number
+        // can be a real match in more than one of those counties (e.g. a
+        // "County Road 227" that's real in both Grimes and Brazoria
+        // county). Not specific enough on its own to anchor the rest of a
+        // batch's search — see geocodeAll.
+        specific: false
+      });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -992,8 +1003,11 @@
       var best = bestStreetMatch(feats, parsed, function (f) { return f.attributes.STREET; });
       if (!best) { callback(null); return; }
       // This is the county's own ground-truth 911 addressing data — a
-      // strictly matched point is exact, not an estimate.
-      callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100, trusted: true });
+      // strictly matched point is exact, not an estimate. It's also scoped
+      // to one specific county (unlike the big regional locators above),
+      // so a match here is a reliable signal for where THIS list actually
+      // is — see geocodeAll.
+      callback({ lat: best.attributes.LATCOORDY, lng: best.attributes.LONCOORDX, approx: false, score: 100, trusted: true, specific: true });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -1047,7 +1061,11 @@
       if (!feats.length) { callback(null); return; }
       var best = bestStreetMatch(feats, parsed, function (f) { return f.attributes.situs_street; });
       if (!best || !best.centroid) { callback(null); return; }
-      callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60, trusted: true });
+      // Scoped to one specific rural county's own property records —
+      // like Montgomery's E-911 points, a real signal for where this
+      // list actually is, not just "some plausible match" — see
+      // geocodeAll.
+      callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60, trusted: true, specific: true });
     }).catch(function () {
       if (timedOut) return;
       window.clearTimeout(timer);
@@ -1075,9 +1093,20 @@
       pending--;
       if (pending > 0) return;
       if (!found.length) { callback(null); return; }
-      // A rooftop-precise hit beats an interpolated one from a different
-      // source even if the interpolated one scored higher internally.
+      // Two different sources can each return a real, valid-looking match
+      // for the same address TEXT in two totally different PLACES — a
+      // same-named highway in a different county, for instance. Precision
+      // type (rooftop vs. interpolated/approximate) says nothing about
+      // which one is actually correct; it only ranks candidates that are
+      // already agreed to be roughly the same real-world spot. So distance
+      // to the search anchor is checked first: when candidates disagree by
+      // more than a couple of miles, they can't both be the same place,
+      // and the one nearer the anchor is almost certainly the real one for
+      // this search. Only once candidates agree on roughly where they are
+      // does precision/score break the tie.
+      found.forEach(function (r) { r._dist = milesBetween(anchor, { lat: r.lat, lng: r.lng }); });
       found.sort(function (a, b) {
+        if (Math.abs(a._dist - b._dist) > 2) return a._dist - b._dist;
         if (!!a.approx !== !!b.approx) return a.approx ? 1 : -1;
         return (b.score || 0) - (a.score || 0);
       });
@@ -1126,7 +1155,7 @@
       var addr = addresses[i++];
       geocodeOne(addr, anchor, function (result) {
         if (result) {
-          results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx, trusted: !!result.trusted });
+          results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx, trusted: !!result.trusted, specific: !!result.specific });
         } else {
           failed.push(addr);
         }
@@ -1147,45 +1176,37 @@
         // list is actually somewhere far from that anchor (built ahead of
         // time from home or an office, or GPS wasn't available), that
         // widening can settle for a real address that just happens to be
-        // closer to the anchor over the correct one much farther out —
-        // e.g. matching "20720 Highway 90" in a Houston suburb 25 miles
-        // from the anchor instead of the real one 90 miles away in a
-        // different county, because the nearer wrong guess turned up
-        // first. Once enough of THIS list's own addresses land a
-        // TRUSTED match — one of the configured government/county
-        // datasets, not Google's plain nationwide guess — their center is
-        // a far better anchor than the original guess. "Trusted" is
-        // deliberately not the same thing as "not flagged approximate":
-        // a parcel-centroid match from a rural county dataset is flagged
-        // approximate (it's the middle of the lot, not the house) but is
-        // still real, verified data for the right property — exactly the
-        // kind of result that should anchor the rest of a rural list.
-        // Google's own guesses never anchor anything, precise-looking or
-        // not, since a wrong-city match can just as easily come back
-        // ROOFTOP-flagged as approximate. Only Google-sourced (untrusted)
-        // results get retried — a trusted match is already as good as
-        // this app can independently verify.
-        var confident = results.filter(function (r) { return r.trusted; });
-        var needsRetry = results.filter(function (r) { return !r.trusted; });
-        if (confident.length < 2 || (!needsRetry.length && !failed.length)) {
-          finish(results, failed);
-          return;
-        }
-        var refined = centroidOf(confident.map(function (r) { return { lat: r.lat, lng: r.lng }; }));
-        if (milesBetween(anchor, refined) < 15) { finish(results, failed); return; } // anchor was already fine — nothing to gain
-        var retryAddrs = needsRetry.map(function (r) { return r.address; }).concat(failed);
-        geocodeBatch(retryAddrs, refined, function (results2) {
-          var byAddr = {};
-          results.forEach(function (r) { byAddr[r.address] = r; });
-          // The retry only ever ran for addresses that were approximate or
-          // missing the first time, so any hit here is a strict improvement
-          // — a real anchor beats a guess from the wrong part of the map.
-          results2.forEach(function (r2) { byAddr[r2.address] = r2; });
-          var merged = addresses
-            .filter(function (a) { return byAddr[a]; })
-            .map(function (a) { return byAddr[a]; });
-          var stillFailed = addresses.filter(function (a) { return !byAddr[a]; });
-          finish(merged, stillFailed);
+        // closer to the anchor than the correct one much farther out —
+        // and this isn't rare: the big regional locators cover a 13-county
+        // area, so the SAME road name/number is often a real address in
+        // more than one of those counties (a "County Road 227" that's a
+        // genuine address in both Grimes county and, 90 miles away,
+        // Brazoria county). Typically MOST of a rural list ends up
+        // affected this way, not just one outlier address, which rules
+        // out trying to spot individual bad results — the only reliable
+        // fix is finding out where the list actually is and re-checking
+        // everything against that.
+        //
+        // The county-specific sources (Montgomery's E-911 points, and the
+        // Grimes/Walker/San Jacinto parcel records) are what settle that:
+        // each one only covers a single small county, so a match from one
+        // of them is a real, near-unambiguous signal for where this list
+        // is — unlike the big regional locators, which can plausibly
+        // answer for the same address text anywhere across 13 counties.
+        // Once ANY of those specific sources produces even one hit, its
+        // location is a far better search anchor than the original guess,
+        // so every address gets looked up again with that anchor —
+        // letting geocodeLocator's own nearest-to-anchor tie-break (see
+        // above) correctly prefer the real, nearby match over a
+        // same-named one from the wrong county, for the whole list at
+        // once, not just whichever addresses a first pass happened to
+        // flag as suspicious.
+        var specific = results.filter(function (r) { return r.specific; });
+        if (!specific.length) { finish(results, failed); return; }
+        var refined = centroidOf(specific.map(function (r) { return { lat: r.lat, lng: r.lng }; }));
+        if (milesBetween(anchor, refined) < 15) { finish(results, failed); return; } // anchor was already fine
+        geocodeBatch(addresses, refined, function (results2, failed2) {
+          finish(results2, failed2);
         });
       });
     });

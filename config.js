@@ -53,17 +53,18 @@ window.DOORSTEP_CONFIG = {
   //   3. Harris County's GIS server, "StarMap" composite locator — a
   //      slightly different build of the same regional data.
   // None of these three cover every rural/unincorporated road — addresses
-  // like "4951 County Road 152" return nothing from any of them, meaning
-  // that specific road genuinely isn't in this dataset, not that the
-  // request failed. Other TX county GIS departments were checked and
-  // rejected as additional sources: Fort Bend County's GIS server is
-  // CORS-blocked from a browser; Liberty, Chambers, Waller, Walker, San
-  // Jacinto, Grimes, Wharton, Austin, Colorado, and Matagorda counties
-  // don't appear to publish a standalone GeocodeServer of their own beyond
-  // what's already folded into the HGAC composite above. If you're
-  // regularly missing addresses in one particular county, check whether
-  // that county's GIS/CAD department has added a public GeocodeServer
-  // since, and append it here.
+  // like "4951 County Road 152" return nothing from any of them, because
+  // that road is in Grimes County, which is outside the 13-county HGAC
+  // region entirely (see PARCEL_LOCATOR_URLS below for how that specific
+  // gap is covered instead). Other TX county GIS departments were checked
+  // and rejected as additional GeocodeServer sources: Fort Bend County's
+  // GIS server is CORS-blocked from a browser; Liberty, Chambers, Waller,
+  // Wharton, Austin, Colorado, and Matagorda counties don't appear to
+  // publish a standalone GeocodeServer of their own beyond what's already
+  // folded into the HGAC composite above. If you're regularly missing
+  // addresses in one particular county, check whether that county's
+  // GIS/CAD department has added a public GeocodeServer since, and append
+  // it here.
   LOCATOR_URLS: [
     "https://www.gis.hctx.net/arcgis/rest/services/Locator/Harris_Co_GCS_Composite/GeocodeServer/findAddressCandidates",
     "https://gis.h-gac.com/arcgis/rest/services/HGAC_911/HGAC_911_Point_Addr_Locator/GeocodeServer/findAddressCandidates",
@@ -77,6 +78,31 @@ window.DOORSTEP_CONFIG = {
   // Harris, Walker, Grimes, San Jacinto, and Waller near the county lines.
   // Free, no key, live-tested working. Leave blank to skip.
   MONTGOMERY_POINTS_URL: "https://services1.arcgis.com/PRoAPGnMSUqvTrzq/arcgis/rest/services/MCECD_Address_Points_view/FeatureServer/1/query",
+
+  // Optional. Rural county appraisal-district (CAD) PARCEL data — this is
+  // what finally covers addresses like "4951 County Road 152" that none of
+  // the sources above have (that road is in Grimes County, entirely outside
+  // the 13-county HGAC region the locators above cover). These counties
+  // aren't geocoders — they're property-parcel maps, so a match returns the
+  // centroid of the parcel the house sits on, not the house itself. On a
+  // large/irregular rural lot that can be a real distance from the front
+  // door, same as what you're seeing in i360's own pins for these roads
+  // (close but not on the house, sometimes down the street) — so every
+  // match from here is marked as an estimate (faded pin, warning on tap)
+  // rather than treated as exact. Confirmed free/no-key/CORS-open and
+  // live-tested against real addresses (down to matching owner name) for
+  // Grimes County. Walker and San Jacinto counties run the identical
+  // platform/schema and were confirmed reachable the same way, so they're
+  // included too even though the specific addresses tested were in Grimes.
+  // More neighboring counties can be added later if they turn out to run
+  // the same "BIS Consultants" GIS platform (gis.bisclient.com/<county>cad) —
+  // load that map in a browser and check the network tab for a FeatureServer
+  // URL the same way these three were found.
+  PARCEL_LOCATOR_URLS: [
+    "https://utility.arcgis.com/usrsvcs/servers/c35ffea8b2da4f9a84aa5034736b026b/rest/services/GrimesCADWebService/FeatureServer/0/query",
+    "https://utility.arcgis.com/usrsvcs/servers/cc98400b3a414d6a9519d8c7ddf61ffc/rest/services/WalkerCADWebService/FeatureServer/0/query",
+    "https://utility.arcgis.com/usrsvcs/servers/84ed63a2d4db42f88c67b9a5bd6154e2/rest/services/SanJacintoCADWebService/FeatureServer/0/query"
+  ],
 
   // Optional. A Google Maps "Map ID" (Cloud Console -> Maps Management ->
   // Map IDs) turns on vector rendering, which lets the map itself rotate

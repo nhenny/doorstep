@@ -918,6 +918,66 @@
     });
   }
 
+  // Several rural county CAD (appraisal-district) offices run the same "BIS
+  // Consultants" GIS platform, which exposes property PARCELS (not address
+  // points) through an Esri FeatureServer. There's no lat/lng column to
+  // read directly — instead we ask Esri to hand back each matching parcel's
+  // polygon CENTROID (returnCentroid=true, returnGeometry=false so we don't
+  // have to download the full shape). A parcel centroid is the middle of
+  // the property line, not the house itself, so on a large or irregular
+  // rural lot the pin can land a real distance from the front door — the
+  // same limitation you can see in i360's own pins for these same roads
+  // (close to the house but not on it, sometimes down the street). It's
+  // still a specific real point instead of "not found," so results are
+  // always flagged approx: true so the UI shows the faded pin + warning.
+  //
+  // Schema note: unlike Montgomery's E-911 points (STR_NUM as a number,
+  // STREET as the field name), this platform stores the house number as
+  // TEXT (situs_num) and needs the value quoted in the WHERE clause even
+  // though it looks numeric — an unquoted STR_NUM=... clause silently
+  // matches nothing here.
+  function geocodeParcelCentroid(base, address, callback) {
+    var parsed = parseHouseAndStreet(address);
+    if (!parsed) { callback(null); return; }
+    var numHint = parsed.streetRaw.match(/\d+/);
+    var hint = numHint ? numHint[0] : (parsed.streetRaw.split(/\s+/)[0] || parsed.streetRaw);
+    var where = "situs_num='" + String(parsed.num).replace(/'/g, "''") + "' AND situs_street LIKE '%" + hint.replace(/'/g, "''") + "%'";
+    var url = base + "?" + [
+      "where=" + encodeURIComponent(where),
+      "outFields=situs_num,situs_street,file_as_name",
+      "returnCentroid=true",
+      "returnGeometry=false",
+      "outSR=4326",
+      "resultRecordCount=50",
+      "f=json"
+    ].join("&");
+
+    var timedOut = false;
+    var timer = window.setTimeout(function () { timedOut = true; callback(null); }, 6000);
+
+    fetch(url).then(function (res) {
+      return res.json();
+    }).then(function (json) {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      var feats = (json && json.features) || [];
+      if (!feats.length) { callback(null); return; }
+      var streetWords = parsed.streetRaw.split(/\s+/).filter(Boolean);
+      var best = null, bestOverlap = 0;
+      feats.forEach(function (f) {
+        var street = (f.attributes.situs_street || "").toUpperCase();
+        var overlap = streetWords.filter(function (w) { return street.indexOf(w) !== -1; }).length;
+        if (overlap > bestOverlap) { bestOverlap = overlap; best = f; }
+      });
+      if (!best || !best.centroid) { callback(null); return; }
+      callback({ lat: best.centroid.y, lng: best.centroid.x, approx: true, score: 60 });
+    }).catch(function () {
+      if (timedOut) return;
+      window.clearTimeout(timer);
+      callback(null);
+    });
+  }
+
   function geocodeLocator(address, anchor, callback) {
     var tasks = [];
     (CONFIG.LOCATOR_URLS || []).forEach(function (base) {
@@ -926,6 +986,9 @@
     if (CONFIG.MONTGOMERY_POINTS_URL) {
       tasks.push(function (done) { geocodeCountyPoints(CONFIG.MONTGOMERY_POINTS_URL, address, done); });
     }
+    (CONFIG.PARCEL_LOCATOR_URLS || []).forEach(function (base) {
+      tasks.push(function (done) { geocodeParcelCentroid(base, address, done); });
+    });
     if (!tasks.length) { callback(null); return; }
 
     var pending = tasks.length;

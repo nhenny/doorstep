@@ -640,16 +640,25 @@
     geocodeAll(addresses, function (err, geocoded, failed) {
       setStopsBusy(false);
       if (err) { setStopsStatus(err, true); return; }
+      // Preserve any pin that was already dragged into place by hand for
+      // this area (see renderStopsOnMap) — a manual correction is ground
+      // truth and shouldn't get silently overwritten by a fresh geocode.
+      var manualByAddr = {};
+      (loadStopsForArea(area.id) || []).forEach(function (s) {
+        if (s.manuallyPlaced) manualByAddr[s.address] = s;
+      });
       var stops = geocoded.map(function (g, i) {
         var match = pairs.filter(function (p) { return p.address === g.address; })[0];
+        var manual = manualByAddr[g.address];
         return {
           address: g.address,
-          lat: g.lat,
-          lng: g.lng,
+          lat: manual ? manual.lat : g.lat,
+          lng: manual ? manual.lng : g.lng,
           status: "upcoming",
           order: i,
           label: (match && match.label) || String(i + 1),
-          approx: !!g.approx
+          approx: manual ? false : !!g.approx,
+          manuallyPlaced: !!manual
         };
       });
       saveStopsForArea(area.id, stops);
@@ -1084,30 +1093,81 @@
     });
   }
 
+  function centroidOf(points) {
+    var sumLat = 0, sumLng = 0;
+    points.forEach(function (p) { sumLat += p.lat; sumLng += p.lng; });
+    return { lat: sumLat / points.length, lng: sumLng / points.length };
+  }
+
+  // Looks up every address in the list against one fixed anchor point,
+  // one at a time (serialized with a short delay — Google's Geocoding API
+  // has a per-second rate limit).
+  function geocodeBatch(addresses, anchor, callback) {
+    var results = [];
+    var failed = [];
+    var i = 0;
+    function next() {
+      if (i >= addresses.length) { callback(results, failed); return; }
+      var addr = addresses[i++];
+      geocodeOne(addr, anchor, function (result) {
+        if (result) {
+          results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx });
+        } else {
+          failed.push(addr);
+        }
+        window.setTimeout(next, 180); // stay well under Geocoding's per-second rate limit
+      });
+    }
+    next();
+  }
+
   function geocodeAll(addresses, callback) {
     if (!geocoder) geocoder = new google.maps.Geocoder();
     getUserAnchor(function (anchor) {
-      var results = [];
-      var failed = [];
-      var i = 0;
-      function next() {
-        if (i >= addresses.length) {
-          if (!results.length) { callback("Couldn't find any of those addresses. Try including city and state."); return; }
-          callback(null, results, failed);
+      geocodeBatch(addresses, anchor, function (results, failed) {
+        // A walk list is one cluster of addresses in one place. The search
+        // above widens outward from "anchor" — the phone's current GPS, or
+        // a generic regional fallback if that's unavailable — and takes
+        // the nearest plausible-looking match at each radius tier. If the
+        // list is actually somewhere far from that anchor (built ahead of
+        // time from home or an office, or GPS wasn't available), that
+        // widening can settle for a real address that just happens to be
+        // closer to the anchor over the correct one much farther out —
+        // e.g. matching "20720 Highway 90" in a Houston suburb 25 miles
+        // from the anchor instead of the real one 90 miles away in a
+        // different county, because the nearer wrong guess turned up
+        // first. Once enough of THIS list's own addresses land a
+        // confident (non-estimated) match, their center is a far better
+        // anchor than the original guess — so anything that came back
+        // approximate or unfound gets one more try centered there instead.
+        var confident = results.filter(function (r) { return !r.approx; });
+        var needsRetry = results.filter(function (r) { return r.approx; });
+        if (confident.length < 2 || (!needsRetry.length && !failed.length)) {
+          finish(results, failed);
           return;
         }
-        var addr = addresses[i++];
-        geocodeOne(addr, anchor, function (result) {
-          if (result) {
-            results.push({ address: addr, lat: result.lat, lng: result.lng, approx: !!result.approx });
-          } else {
-            failed.push(addr);
-          }
-          window.setTimeout(next, 180); // stay well under Geocoding's per-second rate limit
+        var refined = centroidOf(confident.map(function (r) { return { lat: r.lat, lng: r.lng }; }));
+        if (milesBetween(anchor, refined) < 15) { finish(results, failed); return; } // anchor was already fine — nothing to gain
+        var retryAddrs = needsRetry.map(function (r) { return r.address; }).concat(failed);
+        geocodeBatch(retryAddrs, refined, function (results2) {
+          var byAddr = {};
+          results.forEach(function (r) { byAddr[r.address] = r; });
+          // The retry only ever ran for addresses that were approximate or
+          // missing the first time, so any hit here is a strict improvement
+          // — a real anchor beats a guess from the wrong part of the map.
+          results2.forEach(function (r2) { byAddr[r2.address] = r2; });
+          var merged = addresses
+            .filter(function (a) { return byAddr[a]; })
+            .map(function (a) { return byAddr[a]; });
+          var stillFailed = addresses.filter(function (a) { return !byAddr[a]; });
+          finish(merged, stillFailed);
         });
-      }
-      next();
+      });
     });
+    function finish(results, failed) {
+      if (!results.length) { callback("Couldn't find any of those addresses. Try including city and state."); return; }
+      callback(null, results, failed);
+    }
   }
 
   function optimizeRoute(points, callback) {
@@ -1147,11 +1207,28 @@
         return;
       }
       setStopsStatus("Building the fastest walking route…");
+      // If a pin for one of these addresses was dragged into place by hand
+      // before (see renderStopsOnMap), that correction is real ground
+      // truth — don't let a fresh geocode silently overwrite it.
+      var manualByAddr = {};
+      (loadStopsForArea(area.id) || []).forEach(function (s) {
+        if (s.manuallyPlaced) manualByAddr[s.address] = s;
+      });
       optimizeRoute(geocoded, function (err2, ordered) {
         setStopsBusy(false);
         if (err2) { setStopsStatus(err2, true); return; }
         var stops = ordered.map(function (o, i) {
-          return { address: o.address, lat: o.lat, lng: o.lng, status: "upcoming", order: i, label: String(i + 1), approx: !!o.approx };
+          var manual = manualByAddr[o.address];
+          return {
+            address: o.address,
+            lat: manual ? manual.lat : o.lat,
+            lng: manual ? manual.lng : o.lng,
+            status: "upcoming",
+            order: i,
+            label: String(i + 1),
+            approx: manual ? false : !!o.approx,
+            manuallyPlaced: !!manual
+          };
         });
         saveStopsForArea(area.id, stops);
         setStopsRouted(area.id, true);
@@ -1274,13 +1351,41 @@
         map: window.__doorstepMap,
         label: { text: stop.label || String(i + 1), color: "#ffffff", fontSize: "11px", fontWeight: "700" },
         icon: stopIcon(stop.status, stop.approx),
-        title: stop.address + (stop.approx ? " (estimated location)" : ""),
-        zIndex: 500
+        title: stop.address + (stop.approx ? " (estimated location — drag to fix)" : " (drag to reposition)"),
+        zIndex: 500,
+        // No geocoder — ours or Google's or Apple's — can always place a pin
+        // exactly right, especially when the address itself is written
+        // ambiguously (e.g. a trailing "N" that might be a direction, might
+        // be noise). Rather than chase 100% automated accuracy, every pin
+        // can just be dragged onto the real spot by whoever's looking at
+        // the map or standing at the house — that correction is saved and
+        // treated as ground truth from then on.
+        draggable: true
       });
       marker.addListener("click", function () {
         if (!stopInfoWindow) stopInfoWindow = new google.maps.InfoWindow();
         stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, String(i + 1)));
         stopInfoWindow.open({ map: window.__doorstepMap, anchor: marker });
+      });
+      marker.addListener("dragend", function () {
+        var newPos = marker.getPosition();
+        stop.lat = newPos.lat();
+        stop.lng = newPos.lng();
+        // A human just placed this pin by hand — that beats any geocoder,
+        // so it's no longer flagged as an estimate, and it won't get
+        // overwritten by re-running "Build route" later (see buildRoute).
+        stop.approx = false;
+        stop.manuallyPlaced = true;
+        marker.setIcon(stopIcon(stop.status, stop.approx));
+        marker.setTitle(stop.address + " (drag to reposition)");
+        saveStopsForArea(area.id, stops);
+        if (stopPolyline) {
+          var pts = stops.map(function (s) { return { lat: s.lat, lng: s.lng }; });
+          stopPolyline.setPath(pts);
+        }
+        if (stopInfoWindow && stopInfoWindow.getMap()) {
+          stopInfoWindow.setContent(buildStopPopup(stop, marker, area, stops, String(i + 1)));
+        }
       });
       stopMarkers.push(marker);
     });
